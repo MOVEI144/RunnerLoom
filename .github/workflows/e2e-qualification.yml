@@ -1,0 +1,67 @@
+name: RunnerLoom E2E qualification
+
+on:
+  push:
+    branches: [test/runnerloom-e2e-20260909]
+    paths:
+      - '.github/workflows/e2e-qualification.yml'
+      - 'internal/e2e/**'
+      - 'scripts/e2e/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runnerloom-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prerequisites:
+    name: Record live E2E prerequisites without exposing credentials
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Record dedicated credential availability
+        env:
+          E2E_PAT: ${{ secrets.RUNNERLOOM_E2E_PAT }}
+          E2E_APP_CLIENT_ID: ${{ secrets.RUNNERLOOM_E2E_APP_CLIENT_ID }}
+          E2E_APP_INSTALLATION_ID: ${{ secrets.RUNNERLOOM_E2E_APP_INSTALLATION_ID }}
+          E2E_APP_PRIVATE_KEY: ${{ secrets.RUNNERLOOM_E2E_APP_PRIVATE_KEY }}
+        run: |
+          mkdir -p evidence
+          python3 - <<'PY'
+          import json, os, pathlib
+          app = all(os.environ.get(n) for n in ('E2E_APP_CLIENT_ID','E2E_APP_INSTALLATION_ID','E2E_APP_PRIVATE_KEY'))
+          pat = bool(os.environ.get('E2E_PAT'))
+          report = {'commit': os.environ['GITHUB_SHA'], 'live_github_e2e': 'not_run', 'dedicated_app_available': app, 'dedicated_pat_available': pat, 'home_node': 'not_connected_from_this_run', 'reason': 'Dedicated credentials available; live execution still required' if app or pat else 'No dedicated RUNNERLOOM_E2E credentials configured; GITHUB_TOKEN is not substituted for Organization runner administration'}
+          pathlib.Path('evidence/prerequisites.json').write_text(json.dumps(report, indent=2)+'\n')
+          print(json.dumps(report, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('## Live GitHub E2E prerequisites\n\n'+report['reason']+'\n\nNo live GitHub job or home-node qualification has been claimed by this step.\n')
+          PY
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Export exact source for local E2E development
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/runnerloom-e2e-source/source" "$RUNNER_TEMP/runnerloom-e2e-source/out"
+          git archive HEAD | tar -xf - -C "$RUNNER_TEMP/runnerloom-e2e-source/source"
+          go mod vendor
+          cp -a vendor "$RUNNER_TEMP/runnerloom-e2e-source/source/vendor"
+          git rev-parse HEAD > "$RUNNER_TEMP/runnerloom-e2e-source/source/SOURCE_COMMIT"
+          tar -czf "$RUNNER_TEMP/runnerloom-e2e-source/out/source-vendored.tar.gz" -C "$RUNNER_TEMP/runnerloom-e2e-source" source
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always()
+        with:
+          name: e2e-prerequisites-${{ github.run_id }}
+          path: |
+            evidence/
+            ${{ runner.temp }}/runnerloom-e2e-source/out/
+          retention-days: 3
+          if-no-files-found: error
