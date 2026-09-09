@@ -503,7 +503,13 @@ func (m *Manager) Run(ctx context.Context) error {
 	defer ticker.Stop()
 	refresh := time.Time{}
 	policy := time.Time{}
-	fingerprint := core.Fingerprint(m.Config)
+	bindingFingerprint := func(c core.Config) string {
+		return core.Fingerprint(struct {
+			GitHub core.GitHub
+			Pools  []core.Pool
+		}{c.GitHub, c.Pools})
+	}
+	fingerprint := bindingFingerprint(m.Config)
 	for {
 		select {
 		case <-ctx.Done():
@@ -513,7 +519,7 @@ func (m *Manager) Run(ctx context.Context) error {
 			if e != nil {
 				return e
 			}
-			if core.Fingerprint(latest) != fingerprint {
+			if bindingFingerprint(latest) != fingerprint {
 				return core.Fail("CONFIG_RESTART_REQUIRED", "設定を変更しました。Controllerを再起動して接続を更新してください", nil)
 			}
 			if time.Since(policy) > time.Minute {

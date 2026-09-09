@@ -238,6 +238,7 @@ func Enroll(ctx context.Context, invite core.Invitation, c Config) (core.Enrollm
 }
 
 type Agent struct {
+	FreeDisk func(string) (int64, error)
 	Config   Config
 	Provider host.Provider
 	Images   *host.Images
@@ -380,7 +381,11 @@ func (a *Agent) Step(ctx context.Context) error {
 		ready = false
 		digests = []string{}
 	}
-	free, e := host.FreeGiB(a.Config.DiskDir)
+	freeFn := host.FreeGiB
+	if a.FreeDisk != nil {
+		freeFn = a.FreeDisk
+	}
+	free, e := freeFn(a.Config.DiskDir)
 	if e != nil {
 		return e
 	}

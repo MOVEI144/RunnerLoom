@@ -1,49 +1,488 @@
 package core
 
 import (
- "bytes"
- "context"
- "encoding/json"
- "errors"
- "os"
- "path/filepath"
- "strings"
- "sync"
- "sync/atomic"
- "testing"
- "time"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
 )
-var ctx=context.Background()
-func testStore(t *testing.T)(*Store,Config){t.Helper();s,e:=OpenStore(filepath.Join(t.TempDir(),"state"));if e!=nil{t.Fatal(e)};t.Cleanup(func(){_ = s.Close()});c:=Example();p,e:=s.Plan(ctx,c);if e!=nil{t.Fatal(e)};if _,e=s.Apply(ctx,p.ID);e!=nil{t.Fatal(e)};return s,c}
-func observe(t *testing.T,s *Store,c Config,seq int64,reports ...VMReport)SyncResponse{t.Helper();o:=Observation{Node:c.Nodes[0].Name,BootID:"boot-a",Sequence:seq,Ready:true,Isolation:true,Ceiling:c.Nodes[0].LocalCeiling,FreeDiskGiB:1000,Digests:[]string{c.Images[0].Digest},Instances:reports};r,e:=s.Sync(ctx,o.Node,o);if e!=nil{t.Fatal(e)};return r}
-func allocate(t *testing.T,s *Store,pool string)Instance{t.Helper();v,e:=s.Allocate(ctx,ID(),pool);if e!=nil{t.Fatal(e)};return v}
-func code(err error)string{var v *Error;if errors.As(err,&v){return v.Code};return ""}
-func TestExampleValid(t *testing.T){if e:=Example().Validate();e!=nil{t.Fatal(e)}}
-func TestStrictJSON(t *testing.T){tests:=map[string][]byte{"duplicate":[]byte(`{"name":"a","name":"b"}`),"nested-duplicate":[]byte(`{"github":{"url":"x","url":"y"}}`),"unknown":[]byte(`{"surprise":true}`),"trailing":[]byte(`{} {}`),"utf8":{0xff},"too-large":bytes.Repeat([]byte{' '},MaxJSON+1),"depth":[]byte(strings.Repeat("[",70)+"0"+strings.Repeat("]",70))};for n,b:=range tests{t.Run(n,func(t *testing.T){var c Config;if Decode(bytes.NewReader(b),&c)==nil{t.Fatal("accepted invalid JSON")}})}}
-func TestValidationRejects(t *testing.T){cases:=map[string]func(*Config){"version":func(c *Config){c.APIVersion="v999"},"duplicate-node":func(c *Config){c.Nodes=append(c.Nodes,c.Nodes[0])},"unknown-image":func(c *Config){c.Pools[0].Image="missing"},"short-digest":func(c *Config){c.Images[0].Digest="sha256:abc"},"cpu-zero":func(c *Config){c.Pools[0].VCPU=0},"memory-overhead":func(c *Config){c.Pools[0].OverheadMiB=0},"disk-overhead":func(c *Config){c.Pools[0].DiskOverheadGiB=0},"negative-scratch":func(c *Config){c.Pools[0].ScratchGiB=-1},"oversized":func(c *Config){c.Pools[0].VCPU=1<<62},"local-ceiling":func(c *Config){c.Nodes[0].LocalCeiling.CPU=4},"too-many-reservations":func(c *Config){c.Reservations[0].Slots=2},"pool-name":func(c *Config){c.Pools[0].Name="../bad"},"runner-name":func(c *Config){c.Pools[1].RunnerName=c.Pools[0].RunnerName},"unavailable-pool":func(c *Config){c.Pools[0].NodeSelector=map[string]string{"machine":"missing"}},"foreign-org":func(c *Config){c.GitHub.AllowedRepositories=[]string{"other/repo"}},"insecure-github":func(c *Config){c.GitHub.URL="http://github.com/MOVEI144"},"embedded-credentials":func(c *Config){c.GitHub.URL="https://secret@github.com/MOVEI144"},"relative-secret":func(c *Config){c.GitHub.CredentialFile="./token"},"timeout":func(c *Config){c.Pools[0].ExecutionMinutes=7201}}
- for n,change:=range cases{t.Run(n,func(t *testing.T){c:=Example();change(&c);if c.Validate()==nil{t.Fatal("invalid setting accepted")}})}
+
+var ctx = context.Background()
+
+func testStore(t *testing.T) (*Store, Config) {
+	t.Helper()
+	s, e := OpenStore(filepath.Join(t.TempDir(), "state"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	c := Example()
+	p, e := s.Plan(ctx, c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Apply(ctx, p.ID); e != nil {
+		t.Fatal(e)
+	}
+	return s, c
 }
-func TestHardReservation(t *testing.T){s,c:=testStore(t);observe(t,s,c,1);general:=allocate(t,s,"linux-lite");if general.Reservation!=""{t.Fatal("general pool borrowed reservation")};if _,e:=s.Allocate(ctx,ID(),"linux-lite");code(e)!="NO_CAPACITY"{t.Fatalf("wanted capacity refusal: %v",e)};dedicated:=allocate(t,s,"linux-heavy");if dedicated.Reservation!="heavy-reserved"{t.Fatal("dedicated pool did not use reserved slot")}}
-func TestConcurrentAllocationAcrossConnections(t *testing.T){s,c:=testStore(t);observe(t,s,c,1);other,e:=OpenStore(s.Dir);if e!=nil{t.Fatal(e)};defer other.Close();var wg sync.WaitGroup;var successes atomic.Int64;for i:=0;i<24;i++{wg.Add(1);go func(i int){defer wg.Done();db:=s;if i%2==1{db=other};_,e:=db.Allocate(ctx,ID(),"linux-lite");if e==nil{successes.Add(1)}else if code(e)!="NO_CAPACITY"{t.Errorf("unexpected allocation error: %v",e)}}(i)};wg.Wait();if successes.Load()!=1{t.Fatalf("allocated %d jobs into one general slot",successes.Load())}}
-func TestIdempotency(t *testing.T){s,c:=testStore(t);observe(t,s,c,1);first:=allocate(t,s,"linux-lite");second,e:=s.Allocate(ctx,first.RequestID,"linux-lite");if e!=nil||second.ID!=first.ID{t.Fatal("request replay duplicated allocation",e)};if _,e=s.Allocate(ctx,first.RequestID,"linux-heavy");code(e)!="IDEMPOTENCY_CONFLICT"{t.Fatal("conflicting request accepted",e)}}
-func TestOfflineAndMissingImageAreNotCapacity(t *testing.T){for _,what:=range []string{"not-observed","stale","image-missing","no-isolation","drained"}{t.Run(what,func(t *testing.T){s,c:=testStore(t);if what!="not-observed"{o:=Observation{Node:"node-a",BootID:"boot",Sequence:1,Ready:true,Isolation:true,Ceiling:c.Nodes[0].Budget,FreeDiskGiB:1000,Digests:[]string{c.Images[0].Digest}};if what=="image-missing"{o.Digests=nil};if what=="no-isolation"{o.Isolation=false};if _,e:=s.Sync(ctx,o.Node,o);e!=nil{t.Fatal(e)};if what=="stale"{s.Now=func()time.Time{return time.Now().Add(time.Minute)}};if what=="drained"{if e:=s.Drain(ctx,"node-a",true);e!=nil{t.Fatal(e)}}};if _,e:=s.Allocate(ctx,ID(),"linux-lite");code(e)!="NO_CAPACITY"{t.Fatal("unavailable node accepted",e)}})}}
-func TestUnknownHoldsResources(t *testing.T){s,c:=testStore(t);observe(t,s,c,1);v:=allocate(t,s,"linux-lite");observe(t,s,c,2,VMReport{ID:v.ID,State:"Unknown"});runs,e:=s.Instances(ctx);if e!=nil||runs[0].Held!=v.Held{t.Fatal("unknown state released resources",e)};if _,e=s.Allocate(ctx,ID(),"linux-lite");code(e)!="NO_CAPACITY"{t.Fatal("unknown state enabled a duplicate",e)}}
-func TestCleanupRequiresProof(t *testing.T){s,c:=testStore(t);observe(t,s,c,1);v:=allocate(t,s,"linux-lite");if e:=s.SetJIT(ctx,v.ID,123,"FAKE_TEST_JIT");e!=nil{t.Fatal(e)};observe(t,s,c,2,VMReport{ID:v.ID,State:"Running"})
- o:=Observation{Node:"node-a",BootID:"boot-a",Sequence:3,Ready:true,Isolation:true,Ceiling:c.Nodes[0].Budget,FreeDiskGiB:1000,Digests:[]string{c.Images[0].Digest},Instances:[]VMReport{{ID:v.ID,State:"Deleted"}}};if _,e:=s.Sync(ctx,o.Node,o);code(e)!="UNEXPECTED_DELETION"{t.Fatal("unproven deletion accepted",e)}
- reply:=observe(t,s,c,3,VMReport{ID:v.ID,State:"Stopped"});if len(reply.Commands)!=1||reply.Commands[0].Action!="delete"{t.Fatal("cleanup not requested")};runs,_:=s.Instances(ctx);if runs[0].Held.CPU!=0||runs[0].Held.Memory!=0||runs[0].Held.Disk!=v.Held.Disk{t.Fatal("partial cleanup released incorrect resources")};observe(t,s,c,4,VMReport{ID:v.ID,State:"Deleted"});runs,_=s.Instances(ctx);if !runs[0].Held.Empty()||runs[0].State!="Deleted"{t.Fatal("confirmed cleanup did not release resources")}}
-func TestJITIsEncryptedAndRecoverable(t *testing.T){s,c:=testStore(t);observe(t,s,c,1);v:=allocate(t,s,"linux-lite");secret:="TEST_SECRET_"+ID();if e:=s.SetJIT(ctx,v.ID,42,secret);e!=nil{t.Fatal(e)};for _,p:=range []string{"controller.db","controller.db-wal"}{b,e:=os.ReadFile(filepath.Join(s.Dir,p));if e==nil&&bytes.Contains(b,[]byte(secret)){t.Fatal("plaintext JIT persisted")}}
- other,e:=OpenStore(s.Dir);if e!=nil{t.Fatal(e)};defer other.Close();reply:=observe(t,other,c,2);if len(reply.Commands)!=1||reply.Commands[0].JIT!=secret{t.Fatal("persisted JIT did not recover")}}
-func TestDrainSurvivesHeartbeat(t *testing.T){s,c:=testStore(t);observe(t,s,c,1);if e:=s.Drain(ctx,"node-a",true);e!=nil{t.Fatal(e)};observe(t,s,c,2);nodes,e:=s.Nodes(ctx);if e!=nil||!nodes["node-a"].Drained{t.Fatal("heartbeat removed administrative drain")}}
-func TestSequenceFenceSurvivesAgentRestart(t *testing.T){s,c:=testStore(t);observe(t,s,c,10);o:=Observation{Node:"node-a",BootID:"new-process",Sequence:1,Ready:true,Isolation:true,Ceiling:c.Nodes[0].Budget,FreeDiskGiB:1000};if _,e:=s.Sync(ctx,o.Node,o);code(e)!="STALE_REPORT"{t.Fatal("restarted process reset sequence fence",e)}}
-func TestPlanConflictAndReplay(t *testing.T){s,c:=testStore(t);a,e:=s.Plan(ctx,c);if e!=nil{t.Fatal(e)};b,e:=s.Plan(ctx,c);if e!=nil{t.Fatal(e)};r,e:=s.Apply(ctx,a.ID);if e!=nil{t.Fatal(e)};r2,e:=s.Apply(ctx,a.ID);if e!=nil||r!=r2{t.Fatal("plan replay changed revision")};if _,e=s.Apply(ctx,b.ID);code(e)!="REVISION_CONFLICT"{t.Fatal("stale plan accepted",e)}}
-func TestExpiredPlan(t *testing.T){s,c:=testStore(t);p,e:=s.Plan(ctx,c);if e!=nil{t.Fatal(e)};s.Now=func()time.Time{return time.Now().Add(11*time.Minute)};if _,e=s.Apply(ctx,p.ID);code(e)!="PLAN_EXPIRED"{t.Fatal("expired plan accepted",e)}}
-func TestLivePoolResizeRejected(t *testing.T){s,c:=testStore(t);observe(t,s,c,1);allocate(t,s,"linux-lite");c.Pools[0].MemoryMiB=8192;p,e:=s.Plan(ctx,c);if e!=nil{t.Fatal(e)};if _,e=s.Apply(ctx,p.ID);code(e)!="POOL_IN_USE"{t.Fatal("live pool resized",e)}}
-func TestOmissionDoesNotDelete(t *testing.T){s,c:=testStore(t);c.Nodes=nil;c.Pools=nil;c.Images=nil;c.Reservations=nil;p,e:=s.Plan(ctx,c);if e!=nil{t.Fatal(e)};if _,e=s.Apply(ctx,p.ID);e!=nil{t.Fatal(e)};saved,_,e:=s.Config(ctx);if e!=nil||len(saved.Nodes)!=1||len(saved.Pools)!=2||len(saved.Reservations)!=1{t.Fatal("omission deleted configuration",e)}}
-func TestMessageDedupeAndDemandBarrier(t *testing.T){s,c:=testStore(t);observe(t,s,c,1);if e:=s.PersistMessage(ctx,"session",1,"linux-lite",1,nil);e!=nil{t.Fatal(e)};if e:=s.PersistMessage(ctx,"session",1,"linux-lite",1,nil);e!=nil{t.Fatal(e)};if e:=s.PersistMessage(ctx,"session",1,"linux-lite",2,nil);code(e)!="MESSAGE_CONFLICT"{t.Fatal("message identity changed silently",e)};v:=allocate(t,s,"linux-lite");observe(t,s,c,2,VMReport{ID:v.ID,State:"Stopped"});d,e:=s.Demands(ctx);if e!=nil||len(d)!=1||!d[0].Blocked{t.Fatal("host completion did not fence stale demand",e)};if e=s.RefreshDemand(ctx,"linux-lite",0);e!=nil{t.Fatal(e)};d,_=s.Demands(ctx);if d[0].Blocked||d[0].Desired!=0{t.Fatal("fresh statistics did not clear barrier")}}
-func TestBackupPreservesAllocations(t *testing.T){s,c:=testStore(t);observe(t,s,c,1);allocate(t,s,"linux-lite");destination:=filepath.Join(t.TempDir(),"backup.db");if e:=s.Backup(ctx,destination);e!=nil{t.Fatal(e)};if e:=s.Backup(ctx,destination);e==nil{t.Fatal("backup overwrote an existing file")};st,e:=os.Stat(destination);if e!=nil||st.Size()==0||st.Mode().Perm()!=0600{t.Fatal("backup was not privately persisted")}}
-func TestPrivateStorageRefusesSymlinks(t *testing.T){dir:=t.TempDir();real:=filepath.Join(dir,"real");if e:=os.Mkdir(real,0700);e!=nil{t.Fatal(e)};link:=filepath.Join(dir,"link");if e:=os.Symlink(real,link);e!=nil{t.Fatal(e)};if _,e:=OpenStore(link);e==nil{t.Fatal("symlink state accepted")};if e:=os.WriteFile(filepath.Join(real,"controller.db"),nil,0644);e!=nil{t.Fatal(e)};if _,e:=OpenStore(real);e==nil{t.Fatal("world-readable database accepted")}}
-func TestProcessLock(t *testing.T){dir:=filepath.Join(t.TempDir(),"lock");a,e:=AcquireLock(dir,"controller");if e!=nil{t.Fatal(e)};if _,e=AcquireLock(dir,"controller");code(e)!="ALREADY_RUNNING"{t.Fatal("two controllers acquired same lease",e)};a.Close();b,e:=AcquireLock(dir,"controller");if e!=nil{t.Fatal(e)};b.Close()}
-func TestInvitationApprovalRevocation(t *testing.T){s,c:=testStore(t);ca,e:=InitCA(s.Dir,c.Name);if e!=nil{t.Fatal(e)};invite,e:=s.Invite(ctx,ca,"https://controller.example:8443",10*time.Minute);if e!=nil{t.Fatal(e)};_,csr,e:=NewKeyCSR();if e!=nil{t.Fatal(e)};q:=JoinRequest{ID:invite.ID,Secret:invite.Secret,Name:"node-b",CSR:csr,Ceiling:c.Nodes[0].Budget};request,e:=s.Join(ctx,q);if e!=nil{t.Fatal(e)};again,e:=s.Join(ctx,q);if e!=nil||again.ID!=request.ID{t.Fatal("enrollment was not idempotent")};_,other,_:=NewKeyCSR();q2:=q;q2.CSR=other;if _,e=s.Join(ctx,q2);code(e)!="INVITE_BOUND"{t.Fatal("invitation rebound to another key",e)};approved,e:=s.Approve(ctx,request.ID,ca);if e!=nil||approved.Status!="Approved"{t.Fatal("approval failed",e)};if e=s.Authorize(ctx,"node-b");e!=nil{t.Fatal(e)};if e=s.Revoke(ctx,"node-b");e!=nil{t.Fatal(e)};if e=s.Authorize(ctx,"node-b");code(e)!="NODE_UNAUTHORIZED"{t.Fatal("revoked node remained authorized",e)}}
-func TestExpiredInvitationDoesNotApprove(t *testing.T){s,c:=testStore(t);ca,e:=InitCA(s.Dir,c.Name);if e!=nil{t.Fatal(e)};inv,e:=s.Invite(ctx,ca,"https://localhost:8443",time.Minute);if e!=nil{t.Fatal(e)};_,csr,_:=NewKeyCSR();r,e:=s.Join(ctx,JoinRequest{ID:inv.ID,Secret:inv.Secret,Name:"node-b",CSR:csr,Ceiling:c.Nodes[0].Budget});if e!=nil{t.Fatal(e)};s.Now=func()time.Time{return time.Now().Add(2*time.Minute)};if _,e=s.Approve(ctx,r.ID,ca);code(e)!="INVITE_INVALID"{t.Fatal("expired invitation approved",e)}}
-func TestRoundTripJSON(t *testing.T){c:=Example();b,_:=json.Marshal(c);var decoded Config;if e:=Decode(bytes.NewReader(b),&decoded);e!=nil{t.Fatal(e)};if Fingerprint(c)!=Fingerprint(decoded){t.Fatal("round-trip changed contract")}}
-func FuzzDecode(f *testing.F){b,_:=json.Marshal(Example());f.Add(b);f.Add([]byte(`{"name":"x","name":"y"}`));f.Fuzz(func(t *testing.T,b []byte){var c Config;if Decode(bytes.NewReader(b),&c)==nil{_ = c.Validate()}})}
+func observe(t *testing.T, s *Store, c Config, seq int64, reports ...VMReport) SyncResponse {
+	t.Helper()
+	o := Observation{Node: c.Nodes[0].Name, BootID: "boot-a", Sequence: seq, Ready: true, Isolation: true, Ceiling: c.Nodes[0].LocalCeiling, FreeDiskGiB: 1000, Digests: []string{c.Images[0].Digest}, Instances: reports}
+	r, e := s.Sync(ctx, o.Node, o)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return r
+}
+func allocate(t *testing.T, s *Store, pool string) Instance {
+	t.Helper()
+	v, e := s.Allocate(ctx, ID(), pool)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return v
+}
+func code(err error) string {
+	var v *Error
+	if errors.As(err, &v) {
+		return v.Code
+	}
+	return ""
+}
+func TestExampleValid(t *testing.T) {
+	if e := Example().Validate(); e != nil {
+		t.Fatal(e)
+	}
+}
+func TestStrictJSON(t *testing.T) {
+	tests := map[string][]byte{"duplicate": []byte(`{"name":"a","name":"b"}`), "nested-duplicate": []byte(`{"github":{"url":"x","url":"y"}}`), "unknown": []byte(`{"surprise":true}`), "trailing": []byte(`{} {}`), "utf8": {0xff}, "too-large": bytes.Repeat([]byte{' '}, MaxJSON+1), "depth": []byte(strings.Repeat("[", 70) + "0" + strings.Repeat("]", 70))}
+	for n, b := range tests {
+		t.Run(n, func(t *testing.T) {
+			var c Config
+			if Decode(bytes.NewReader(b), &c) == nil {
+				t.Fatal("accepted invalid JSON")
+			}
+		})
+	}
+}
+func TestValidationRejects(t *testing.T) {
+	cases := map[string]func(*Config){"version": func(c *Config) { c.APIVersion = "v999" }, "duplicate-node": func(c *Config) { c.Nodes = append(c.Nodes, c.Nodes[0]) }, "unknown-image": func(c *Config) { c.Pools[0].Image = "missing" }, "short-digest": func(c *Config) { c.Images[0].Digest = "sha256:abc" }, "cpu-zero": func(c *Config) { c.Pools[0].VCPU = 0 }, "memory-overhead": func(c *Config) { c.Pools[0].OverheadMiB = 0 }, "disk-overhead": func(c *Config) { c.Pools[0].DiskOverheadGiB = 0 }, "negative-scratch": func(c *Config) { c.Pools[0].ScratchGiB = -1 }, "oversized": func(c *Config) { c.Pools[0].VCPU = 1 << 62 }, "local-ceiling": func(c *Config) { c.Nodes[0].LocalCeiling.CPU = 4 }, "too-many-reservations": func(c *Config) { c.Reservations[0].Slots = 2 }, "pool-name": func(c *Config) { c.Pools[0].Name = "../bad" }, "runner-name": func(c *Config) { c.Pools[1].RunnerName = c.Pools[0].RunnerName }, "unavailable-pool": func(c *Config) { c.Pools[0].NodeSelector = map[string]string{"machine": "missing"} }, "foreign-org": func(c *Config) { c.GitHub.AllowedRepositories = []string{"other/repo"} }, "insecure-github": func(c *Config) { c.GitHub.URL = "http://github.com/MOVEI144" }, "embedded-credentials": func(c *Config) { c.GitHub.URL = "https://secret@github.com/MOVEI144" }, "relative-secret": func(c *Config) { c.GitHub.CredentialFile = "./token" }, "timeout": func(c *Config) { c.Pools[0].ExecutionMinutes = 7201 }}
+	for n, change := range cases {
+		t.Run(n, func(t *testing.T) {
+			c := Example()
+			change(&c)
+			if c.Validate() == nil {
+				t.Fatal("invalid setting accepted")
+			}
+		})
+	}
+}
+func TestHardReservation(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	general := allocate(t, s, "linux-lite")
+	if general.Reservation != "" {
+		t.Fatal("general pool borrowed reservation")
+	}
+	if _, e := s.Allocate(ctx, ID(), "linux-lite"); code(e) != "NO_CAPACITY" {
+		t.Fatalf("wanted capacity refusal: %v", e)
+	}
+	dedicated := allocate(t, s, "linux-heavy")
+	if dedicated.Reservation != "heavy-reserved" {
+		t.Fatal("dedicated pool did not use reserved slot")
+	}
+}
+func TestConcurrentAllocationAcrossConnections(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	other, e := OpenStore(s.Dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer other.Close()
+	var wg sync.WaitGroup
+	var successes atomic.Int64
+	for i := 0; i < 24; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			db := s
+			if i%2 == 1 {
+				db = other
+			}
+			_, e := db.Allocate(ctx, ID(), "linux-lite")
+			if e == nil {
+				successes.Add(1)
+			} else if code(e) != "NO_CAPACITY" {
+				t.Errorf("unexpected allocation error: %v", e)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if successes.Load() != 1 {
+		t.Fatalf("allocated %d jobs into one general slot", successes.Load())
+	}
+}
+func TestIdempotency(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	first := allocate(t, s, "linux-lite")
+	second, e := s.Allocate(ctx, first.RequestID, "linux-lite")
+	if e != nil || second.ID != first.ID {
+		t.Fatal("request replay duplicated allocation", e)
+	}
+	if _, e = s.Allocate(ctx, first.RequestID, "linux-heavy"); code(e) != "IDEMPOTENCY_CONFLICT" {
+		t.Fatal("conflicting request accepted", e)
+	}
+}
+func TestOfflineAndMissingImageAreNotCapacity(t *testing.T) {
+	for _, what := range []string{"not-observed", "stale", "image-missing", "no-isolation", "drained"} {
+		t.Run(what, func(t *testing.T) {
+			s, c := testStore(t)
+			if what != "not-observed" {
+				o := Observation{Node: "node-a", BootID: "boot", Sequence: 1, Ready: true, Isolation: true, Ceiling: c.Nodes[0].Budget, FreeDiskGiB: 1000, Digests: []string{c.Images[0].Digest}}
+				if what == "image-missing" {
+					o.Digests = nil
+				}
+				if what == "no-isolation" {
+					o.Isolation = false
+				}
+				if _, e := s.Sync(ctx, o.Node, o); e != nil {
+					t.Fatal(e)
+				}
+				if what == "stale" {
+					s.Now = func() time.Time { return time.Now().Add(time.Minute) }
+				}
+				if what == "drained" {
+					if e := s.Drain(ctx, "node-a", true); e != nil {
+						t.Fatal(e)
+					}
+				}
+			}
+			if _, e := s.Allocate(ctx, ID(), "linux-lite"); code(e) != "NO_CAPACITY" {
+				t.Fatal("unavailable node accepted", e)
+			}
+		})
+	}
+}
+func TestUnknownHoldsResources(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	v := allocate(t, s, "linux-lite")
+	observe(t, s, c, 2, VMReport{ID: v.ID, State: "Unknown"})
+	runs, e := s.Instances(ctx)
+	if e != nil || runs[0].Held != v.Held {
+		t.Fatal("unknown state released resources", e)
+	}
+	if _, e = s.Allocate(ctx, ID(), "linux-lite"); code(e) != "NO_CAPACITY" {
+		t.Fatal("unknown state enabled a duplicate", e)
+	}
+}
+func TestCleanupRequiresProof(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	v := allocate(t, s, "linux-lite")
+	if e := s.SetJIT(ctx, v.ID, 123, "FAKE_TEST_JIT"); e != nil {
+		t.Fatal(e)
+	}
+	observe(t, s, c, 2, VMReport{ID: v.ID, State: "Running"})
+	o := Observation{Node: "node-a", BootID: "boot-a", Sequence: 3, Ready: true, Isolation: true, Ceiling: c.Nodes[0].Budget, FreeDiskGiB: 1000, Digests: []string{c.Images[0].Digest}, Instances: []VMReport{{ID: v.ID, State: "Deleted"}}}
+	if _, e := s.Sync(ctx, o.Node, o); code(e) != "UNEXPECTED_DELETION" {
+		t.Fatal("unproven deletion accepted", e)
+	}
+	reply := observe(t, s, c, 3, VMReport{ID: v.ID, State: "Stopped"})
+	if len(reply.Commands) != 1 || reply.Commands[0].Action != "delete" {
+		t.Fatal("cleanup not requested")
+	}
+	runs, _ := s.Instances(ctx)
+	if runs[0].Held.CPU != 0 || runs[0].Held.Memory != 0 || runs[0].Held.Disk != v.Held.Disk {
+		t.Fatal("partial cleanup released incorrect resources")
+	}
+	observe(t, s, c, 4, VMReport{ID: v.ID, State: "Deleted"})
+	runs, _ = s.Instances(ctx)
+	if !runs[0].Held.Empty() || runs[0].State != "Deleted" {
+		t.Fatal("confirmed cleanup did not release resources")
+	}
+}
+func TestJITIsEncryptedAndRecoverable(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	v := allocate(t, s, "linux-lite")
+	secret := "TEST_SECRET_" + ID()
+	if e := s.SetJIT(ctx, v.ID, 42, secret); e != nil {
+		t.Fatal(e)
+	}
+	for _, p := range []string{"controller.db", "controller.db-wal"} {
+		b, e := os.ReadFile(filepath.Join(s.Dir, p))
+		if e == nil && bytes.Contains(b, []byte(secret)) {
+			t.Fatal("plaintext JIT persisted")
+		}
+	}
+	other, e := OpenStore(s.Dir)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer other.Close()
+	reply := observe(t, other, c, 2)
+	if len(reply.Commands) != 1 || reply.Commands[0].JIT != secret {
+		t.Fatal("persisted JIT did not recover")
+	}
+}
+func TestDrainSurvivesHeartbeat(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	if e := s.Drain(ctx, "node-a", true); e != nil {
+		t.Fatal(e)
+	}
+	observe(t, s, c, 2)
+	nodes, e := s.Nodes(ctx)
+	if e != nil || !nodes["node-a"].Drained {
+		t.Fatal("heartbeat removed administrative drain")
+	}
+}
+func TestSequenceFenceSurvivesAgentRestart(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 10)
+	o := Observation{Node: "node-a", BootID: "new-process", Sequence: 1, Ready: true, Isolation: true, Ceiling: c.Nodes[0].Budget, FreeDiskGiB: 1000}
+	if _, e := s.Sync(ctx, o.Node, o); code(e) != "STALE_REPORT" {
+		t.Fatal("restarted process reset sequence fence", e)
+	}
+}
+func TestPlanConflictAndReplay(t *testing.T) {
+	s, c := testStore(t)
+	a, e := s.Plan(ctx, c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	b, e := s.Plan(ctx, c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	r, e := s.Apply(ctx, a.ID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	r2, e := s.Apply(ctx, a.ID)
+	if e != nil || r != r2 {
+		t.Fatal("plan replay changed revision")
+	}
+	if _, e = s.Apply(ctx, b.ID); code(e) != "REVISION_CONFLICT" {
+		t.Fatal("stale plan accepted", e)
+	}
+}
+func TestExpiredPlan(t *testing.T) {
+	s, c := testStore(t)
+	p, e := s.Plan(ctx, c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	s.Now = func() time.Time { return time.Now().Add(11 * time.Minute) }
+	if _, e = s.Apply(ctx, p.ID); code(e) != "PLAN_EXPIRED" {
+		t.Fatal("expired plan accepted", e)
+	}
+}
+func TestLivePoolResizeRejected(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	allocate(t, s, "linux-lite")
+	c.Pools[0].MemoryMiB = 8192
+	p, e := s.Plan(ctx, c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Apply(ctx, p.ID); code(e) != "POOL_IN_USE" {
+		t.Fatal("live pool resized", e)
+	}
+}
+func TestOmissionDoesNotDelete(t *testing.T) {
+	s, c := testStore(t)
+	c.Nodes = nil
+	c.Pools = nil
+	c.Images = nil
+	c.Reservations = nil
+	p, e := s.Plan(ctx, c)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.Apply(ctx, p.ID); e != nil {
+		t.Fatal(e)
+	}
+	saved, _, e := s.Config(ctx)
+	if e != nil || len(saved.Nodes) != 1 || len(saved.Pools) != 2 || len(saved.Reservations) != 1 {
+		t.Fatal("omission deleted configuration", e)
+	}
+}
+func TestMessageDedupeAndDemandBarrier(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	if e := s.PersistMessage(ctx, "session", 1, "linux-lite", 1, nil); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.PersistMessage(ctx, "session", 1, "linux-lite", 1, nil); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.PersistMessage(ctx, "session", 1, "linux-lite", 2, nil); code(e) != "MESSAGE_CONFLICT" {
+		t.Fatal("message identity changed silently", e)
+	}
+	v := allocate(t, s, "linux-lite")
+	observe(t, s, c, 2, VMReport{ID: v.ID, State: "Stopped"})
+	d, e := s.Demands(ctx)
+	if e != nil || len(d) != 1 || !d[0].Blocked {
+		t.Fatal("host completion did not fence stale demand", e)
+	}
+	if e = s.RefreshDemand(ctx, "linux-lite", 0); e != nil {
+		t.Fatal(e)
+	}
+	d, _ = s.Demands(ctx)
+	if d[0].Blocked || d[0].Desired != 0 {
+		t.Fatal("fresh statistics did not clear barrier")
+	}
+}
+func TestBackupPreservesAllocations(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	allocate(t, s, "linux-lite")
+	destination := filepath.Join(t.TempDir(), "backup.db")
+	if e := s.Backup(ctx, destination); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Backup(ctx, destination); e == nil {
+		t.Fatal("backup overwrote an existing file")
+	}
+	st, e := os.Stat(destination)
+	if e != nil || st.Size() == 0 || st.Mode().Perm() != 0600 {
+		t.Fatal("backup was not privately persisted")
+	}
+}
+func TestPrivateStorageRefusesSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	if e := os.Mkdir(real, 0700); e != nil {
+		t.Fatal(e)
+	}
+	link := filepath.Join(dir, "link")
+	if e := os.Symlink(real, link); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := OpenStore(link); e == nil {
+		t.Fatal("symlink state accepted")
+	}
+	if e := os.WriteFile(filepath.Join(real, "controller.db"), nil, 0644); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.Chmod(filepath.Join(real, "controller.db"), 0644); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := OpenStore(real); e == nil {
+		t.Fatal("world-readable database accepted")
+	}
+}
+func TestProcessLock(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "lock")
+	a, e := AcquireLock(dir, "controller")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = AcquireLock(dir, "controller"); code(e) != "ALREADY_RUNNING" {
+		t.Fatal("two controllers acquired same lease", e)
+	}
+	a.Close()
+	b, e := AcquireLock(dir, "controller")
+	if e != nil {
+		t.Fatal(e)
+	}
+	b.Close()
+}
+func TestInvitationApprovalRevocation(t *testing.T) {
+	s, c := testStore(t)
+	ca, e := InitCA(s.Dir, c.Name)
+	if e != nil {
+		t.Fatal(e)
+	}
+	invite, e := s.Invite(ctx, ca, "https://controller.example:8443", 10*time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, csr, e := NewKeyCSR()
+	if e != nil {
+		t.Fatal(e)
+	}
+	q := JoinRequest{ID: invite.ID, Secret: invite.Secret, Name: "node-b", CSR: csr, Ceiling: c.Nodes[0].Budget}
+	request, e := s.Join(ctx, q)
+	if e != nil {
+		t.Fatal(e)
+	}
+	again, e := s.Join(ctx, q)
+	if e != nil || again.ID != request.ID {
+		t.Fatal("enrollment was not idempotent")
+	}
+	_, other, _ := NewKeyCSR()
+	q2 := q
+	q2.CSR = other
+	if _, e = s.Join(ctx, q2); code(e) != "INVITE_BOUND" {
+		t.Fatal("invitation rebound to another key", e)
+	}
+	approved, e := s.Approve(ctx, request.ID, ca)
+	if e != nil || approved.Status != "Approved" {
+		t.Fatal("approval failed", e)
+	}
+	if e = s.Authorize(ctx, "node-b"); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.Revoke(ctx, "node-b"); e != nil {
+		t.Fatal(e)
+	}
+	if e = s.Authorize(ctx, "node-b"); code(e) != "NODE_UNAUTHORIZED" {
+		t.Fatal("revoked node remained authorized", e)
+	}
+}
+func TestExpiredInvitationDoesNotApprove(t *testing.T) {
+	s, c := testStore(t)
+	ca, e := InitCA(s.Dir, c.Name)
+	if e != nil {
+		t.Fatal(e)
+	}
+	inv, e := s.Invite(ctx, ca, "https://localhost:8443", time.Minute)
+	if e != nil {
+		t.Fatal(e)
+	}
+	_, csr, _ := NewKeyCSR()
+	r, e := s.Join(ctx, JoinRequest{ID: inv.ID, Secret: inv.Secret, Name: "node-b", CSR: csr, Ceiling: c.Nodes[0].Budget})
+	if e != nil {
+		t.Fatal(e)
+	}
+	s.Now = func() time.Time { return time.Now().Add(2 * time.Minute) }
+	if _, e = s.Approve(ctx, r.ID, ca); code(e) != "INVITE_INVALID" {
+		t.Fatal("expired invitation approved", e)
+	}
+}
+func TestRoundTripJSON(t *testing.T) {
+	c := Example()
+	b, _ := json.Marshal(c)
+	var decoded Config
+	if e := Decode(bytes.NewReader(b), &decoded); e != nil {
+		t.Fatal(e)
+	}
+	if Fingerprint(c) != Fingerprint(decoded) {
+		t.Fatal("round-trip changed contract")
+	}
+}
+func FuzzDecode(f *testing.F) {
+	b, _ := json.Marshal(Example())
+	f.Add(b)
+	f.Add([]byte(`{"name":"x","name":"y"}`))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		var c Config
+		if Decode(bytes.NewReader(b), &c) == nil {
+			_ = c.Validate()
+		}
+	})
+}
