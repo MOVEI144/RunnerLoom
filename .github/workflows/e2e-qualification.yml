@@ -36,7 +36,7 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write('## Live GitHub E2E: NOT RUN\n\n'+report['reason']+'\n\nThe separate runtime job uses explicit GitHub/workload fixtures. It is not a live GitHub or home-cluster acceptance test.\n')
           PY
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: e2e-prerequisites-${{ github.run_id }}
@@ -49,10 +49,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version: '1.27.1'
           cache: true
@@ -94,7 +94,7 @@ jobs:
           done
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/e2e-evidence"
           printf '## Qualification boundary\n\nController, enrolled Agent, SQLite, TLS, real libvirt VMs, image and disk cleanup are tested. GitHub queue/JIT responses and the guest workload are explicit diagnostic fixtures. Live GitHub job execution and home-PC deployment are NOT claimed.\n' >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: e2e-runtime-${{ github.run_id }}
