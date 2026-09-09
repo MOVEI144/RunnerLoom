@@ -21,6 +21,10 @@ jobs:
         with:
           go-version: '1.27.1'
           cache: true
+      - name: Verify accounting state combinations
+        run: |
+          go test ./internal/core -run '^$' -fuzz '^FuzzReservationProtection$' -fuzztime=15s
+          go test -race -count=1 ./...
       - name: Prepare reproducible offline review inputs
         shell: bash
         run: |
@@ -33,7 +37,6 @@ jobs:
           git rev-parse HEAD > "$root/source/SOURCE_COMMIT"
           go version > "$root/source/TOOLCHAIN_VERSION"
           tar -czf "$root/out/source-vendored.tar.gz" -C "$root" source
-          tar -czf "$root/out/go-toolchain.tar.gz" -C "$(go env GOROOT)" .
           (cd "$root/out" && sha256sum *.tar.gz > SHA256SUMS)
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
