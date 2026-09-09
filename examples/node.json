@@ -1,0 +1,15 @@
+{
+  "node": "node-b",
+  "cluster": "home",
+  "controller": "https://controller.local:8443",
+  "stateDir": "/var/lib/runnerloom/node-b",
+  "diskDir": "/var/lib/libvirt/images/runnerloom-home-node-b",
+  "networkCIDR": "172.30.240.0/24",
+  "ceiling": {
+    "vcpu": 12,
+    "memoryMiB": 24576,
+    "diskGiB": 300
+  },
+  "cacheGiB": 100,
+  "qemuUser": "libvirt-qemu"
+}

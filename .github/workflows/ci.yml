@@ -1,0 +1,146 @@
+name: RunnerLoom CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  checks:
+    name: Go, race, integration and CLI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Check formatting and dependency lock
+        run: |
+          test -z "$(gofmt -l cmd internal)"
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      - name: Vet
+        run: go vet ./...
+      - name: Unit, concurrency and mutual-TLS integration tests
+        run: go test -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
+      - name: Fuzz strict configuration parsing
+        run: go test ./internal/core -run '^$' -fuzz '^FuzzDecode$' -fuzztime=5s
+      - name: Fuzz reservation invariants
+        run: go test ./internal/core -run '^$' -fuzz '^FuzzReservationProtection$' -fuzztime=5s
+      - name: Require the Python 3.12 runtime provided by the Ubuntu 24.04 image
+        run: python3.12 -c 'import sys; assert sys.version_info[:2] == (3, 12)'
+      - name: Build and verify release packages
+        run: |
+          go mod vendor
+          python3.12 scripts/package.py --deb
+          python3.12 scripts/test_package.py dist
+          git diff --exit-code -- go.mod go.sum
+      - name: Scan shipped binary for known reachable vulnerabilities
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/runnerloom-vuln"
+          mkdir -p "$stage"
+          tar -xzf dist/runnerloom-*-linux-amd64.tar.gz -C "$stage"
+          go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -mode=binary "$stage"/runnerloom-*/runnerloom
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runnerloom-release-bundle-${{ github.sha }}
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runnerloom-test-evidence-${{ github.sha }}
+          path: coverage.out
+          retention-days: 14
+          if-no-files-found: error
+  real-vm:
+    name: Real Ubuntu VM lifecycle
+    needs: checks
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Prepare capacity on the disposable GitHub-hosted runner
+        run: bash scripts/ci-free-space.sh
+      - name: Install isolated CI-host virtualization tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients cloud-image-utils nftables ubuntu-keyring gpgv dnsmasq-base
+          sudo systemctl start libvirtd
+          sudo virsh -c qemu:///system version
+          mkdir -p dist
+          CGO_ENABLED=0 go build -trimpath -o dist/runnerloom ./cmd/runnerloom
+      - name: Verify Canonical signature, boot VM, execute, power off, delete
+        run: bash scripts/ci-vm-smoke.sh
+      - name: Preserve diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: real-vm-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/runnerloom-evidence/
+          retention-days: 14
+          if-no-files-found: warn
+  golden-image:
+    name: Build verified runner image and boot it
+    needs: checks
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Prepare capacity on the disposable GitHub-hosted runner
+        run: bash scripts/ci-free-space.sh
+      - name: Install image builder and virtualization tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients cloud-image-utils nftables ubuntu-keyring gpgv dnsmasq-base libguestfs-tools
+          sudo systemctl start libvirtd
+          mkdir -p dist
+          CGO_ENABLED=0 go build -trimpath -o dist/runnerloom ./cmd/runnerloom
+      - name: Build an unregistered Golden Image with a verified official Runner
+        run: |
+          sudo install -d -m 0700 /var/lib/runnerloom-ci-build
+          set -o pipefail
+          sudo ./dist/runnerloom image build --out /var/lib/runnerloom-ci-build/runner.qcow2 --json 2>&1 | tee "$RUNNER_TEMP/runnerloom-image-build.log"
+          sudo cp /var/lib/runnerloom-ci-build/runner.qcow2.manifest.json "$RUNNER_TEMP/runner-image.manifest.json"
+          sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/runner-image.manifest.json"
+      - name: Boot the produced image, verify Runner binary and destroy VM
+        env:
+          RUNNERLOOM_SMOKE_IMAGE: /var/lib/runnerloom-ci-build/runner.qcow2
+        run: |
+          bash scripts/ci-vm-smoke.sh
+          grep -q RUNNERLOOM_GITHUB_RUNNER_PRESENT "$RUNNER_TEMP/runnerloom-evidence/vm-smoke.json"
+      - name: Preserve image manifest and execution evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: golden-image-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/runner-image.manifest.json
+            ${{ runner.temp }}/runnerloom-image-build.log
+            ${{ runner.temp }}/runnerloom-evidence/
+          retention-days: 14
+          if-no-files-found: warn

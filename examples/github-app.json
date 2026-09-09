@@ -1,0 +1,5 @@
+{
+  "clientID": "REPLACE_WITH_CLIENT_ID",
+  "installationID": 123456,
+  "privateKeyFile": "/var/lib/runnerloom/controller/github-app.pem"
+}
