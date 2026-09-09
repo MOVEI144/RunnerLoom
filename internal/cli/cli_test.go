@@ -162,3 +162,24 @@ func TestServiceArgumentsDoNotExpand(t *testing.T) {
 		t.Fatal("argument not quoted safely")
 	}
 }
+
+func TestSetupDoesNotOverwriteLostEnrolledKey(t *testing.T) {
+	file := configFixture(t)
+	dir := filepath.Join(t.TempDir(), "controller")
+	args := []string{"setup", "--file", file, "--apply", "--role", "controller-node", "--non-interactive", "--state", dir, "--json"}
+	code, out, errout := invoke(args...)
+	if code != 0 {
+		t.Fatal(code, out, errout)
+	}
+	key := filepath.Join(dir+"-node", "node-key.pem")
+	if e := os.Remove(key); e != nil {
+		t.Fatal(e)
+	}
+	code, _, _ = invoke(args...)
+	if code == 0 {
+		t.Fatal("lost node key silently regenerated")
+	}
+	if _, e := os.Stat(key); !os.IsNotExist(e) {
+		t.Fatal("enrolled key was overwritten")
+	}
+}

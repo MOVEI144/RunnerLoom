@@ -128,7 +128,19 @@ func (l *Libvirt) diskRoot() error {
 	if e := safeDirectory(l.DiskDir, 0711); e != nil {
 		return e
 	}
+	st, err := os.Stat(l.DiskDir)
+	if err != nil {
+		return err
+	}
+	if st.Mode().Perm()&0022 != 0 {
+		return errors.New("VM storage must not be writable by other users")
+	}
 	marker := filepath.Join(l.DiskDir, ".runnerloom-owner")
+	if st, err := os.Lstat(marker); err == nil && !st.Mode().IsRegular() {
+		return errors.New("invalid VM storage ownership marker")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	if b, e := os.ReadFile(marker); e == nil {
 		if string(b) != l.Cluster+"/"+l.Node {
 			return errors.New("VM storage belongs to another node")
@@ -304,18 +316,20 @@ cd /opt/actions-runner`, 1)
 	if diagnostic {
 		run = `#!/bin/bash
 set -eu
-trap 'sync; systemctl poweroff --no-block' EXIT
+trap 'rc=$?; echo RUNNERLOOM_DIAGNOSTIC_EXIT=$rc; sync; sleep 2; systemctl poweroff --no-block' EXIT
 echo RUNNERLOOM_REAL_VM_STARTED
 uname -a
-python3 - <<'PY'
+python3 -u - <<'PY'
 import socket,urllib.request,json,tempfile,pathlib,hashlib
 probe=json.loads(RUNNERLOOM_PROBE_JSON)
+print("RUNNERLOOM_PROBE_START",probe,flush=True)
 if probe:
     target,port=probe.rsplit(':',1)
     s=socket.socket();s.settimeout(3)
     try: s.connect((target,int(port))); raise SystemExit('Host isolation failed: reachable test service')
     except (TimeoutError,OSError): pass
     finally: s.close()
+print('RUNNERLOOM_HOST_PROBE_BLOCKED',flush=True)
 with urllib.request.urlopen('https://github.com/robots.txt',timeout=30) as response:
     assert response.status==200
 print('RUNNERLOOM_PUBLIC_HTTPS_OK')
@@ -344,7 +358,7 @@ echo RUNNERLOOM_REAL_VM_COMPLETED
 	}
 	// JSON string scalars are also valid YAML scalars. No interpolation can add YAML keys.
 	quote := func(s string) string { b, _ := json.Marshal(s); return string(b) }
-	return []byte("#cloud-config\nssh_pwauth: false\ndisable_root: true\nusers:\n  - name: runner\n    lock_passwd: true\n    shell: /bin/bash\n    sudo: ['ALL=(ALL) NOPASSWD:ALL']\nwrite_files:\n  - path: /run/runnerloom-jit\n    permissions: '0600'\n    content: " + quote(jit) + "\n  - path: /usr/local/sbin/runnerloom-job\n    permissions: '0700'\n    content: " + quote(run) + "\nruncmd:\n  - [bash, -c, 'exec /usr/local/sbin/runnerloom-job >/dev/ttyS0 2>&1']\n")
+	return []byte("#cloud-config\nbootcmd:\n  - [systemctl, mask, --now, serial-getty@ttyS0.service]\n  - [systemctl, mask, --now, ssh.service, ssh.socket]\nssh_pwauth: false\ndisable_root: true\nusers:\n  - name: runner\n    lock_passwd: true\n    shell: /bin/bash\n    sudo: ['ALL=(ALL) NOPASSWD:ALL']\nwrite_files:\n  - path: /run/runnerloom-jit\n    permissions: '0600'\n    content: " + quote(jit) + "\n  - path: /usr/local/sbin/runnerloom-job\n    permissions: '0700'\n    content: " + quote(run) + "\nruncmd:\n  - [bash, -c, 'exec /usr/local/sbin/runnerloom-job >/dev/ttyS0 2>&1']\n")
 }
 func (l *Libvirt) ensureConsole(id string, dir string) error {
 	if l.consoles == nil {
@@ -530,6 +544,13 @@ func (l *Libvirt) ensure(ctx context.Context, a core.Instance, jit string, diagn
 	}
 	if !used.Add(a.Pool.Charge()).Fits(l.Ceiling) {
 		return errors.New("local resource commitments exhausted")
+	}
+	free, e := FreeGiB(l.DiskDir)
+	if e != nil {
+		return e
+	}
+	if free < a.Pool.Charge().Disk+2 {
+		return errors.New("physical VM storage lacks the requested capacity and safety margin")
 	}
 	m = manifest{Instance: a, Phase: "prepared", JITHash: core.Hash([]byte(jit)), Diagnostic: diagnostic}
 	if e = l.save(m); e != nil {

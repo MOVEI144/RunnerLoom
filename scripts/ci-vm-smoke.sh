@@ -19,6 +19,12 @@ finish() {
   exit "$status"
 }
 trap finish EXIT
+if [[ -n "${RUNNERLOOM_SMOKE_IMAGE:-}" ]]; then
+  sudo cp "$RUNNERLOOM_SMOKE_IMAGE" "$ROOT/base.qcow2"
+  sudo chown "$(id -u):$(id -g)" "$ROOT/base.qcow2"
+  SHA=$(sha256sum "$ROOT/base.qcow2" | awk '{print $1}')
+  printf '%s\n' "$SHA" > "$EVIDENCE/ubuntu-image.sha256"
+else
 BASE='https://cloud-images.ubuntu.com/noble/current'
 curl --fail --location --retry 3 "$BASE/SHA256SUMS" -o "$ROOT/SHA256SUMS"
 curl --fail --location --retry 3 "$BASE/SHA256SUMS.gpg" -o "$ROOT/SHA256SUMS.gpg"
@@ -29,6 +35,7 @@ SHA=$(awk -v name="$FILENAME" '$2==name || $2=="*"name {print $1}' "$ROOT/SHA256
 curl --fail --location --retry 3 "$BASE/$FILENAME" -o "$ROOT/base.qcow2"
 printf '%s  %s\n' "$SHA" "$ROOT/base.qcow2" | sha256sum --check -
 printf '%s\n' "$SHA" > "$EVIDENCE/ubuntu-image.sha256"
+fi
 sudo python3 - "$STATE" "$DISKS" <<'PY'
 import json,pathlib,sys
 state=pathlib.Path(sys.argv[1]); disks=sys.argv[2]

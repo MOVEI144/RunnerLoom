@@ -57,7 +57,7 @@ func chownPrivateTree(root string, uid, gid int) error {
 		return os.Chown(path, uid, gid)
 	})
 }
-func ServiceUnit(binary, role, state, config, listen, advertise string) (name, unit string, err error) {
+func ServiceUnit(binary, role, state, config, listen, advertise string, discoverable ...bool) (name, unit string, err error) {
 	if !filepath.IsAbs(binary) || !filepath.IsAbs(state) {
 		return "", "", errors.New("absolute binary and state paths required")
 	}
@@ -68,6 +68,9 @@ func ServiceUnit(binary, role, state, config, listen, advertise string) (name, u
 	case "controller":
 		name = "runnerloom-controller.service"
 		command, err = systemdExec(binary, "controller", "run", "--state", state, "--listen", listen, "--advertise", advertise)
+		if len(discoverable) > 0 && discoverable[0] {
+			command += " --discoverable"
+		}
 		writable = []string{state}
 	case "agent":
 		c, e := agent.LoadConfig(config)
@@ -127,7 +130,7 @@ func (a *App) addService(root *cobra.Command) {
 	for _, action := range []string{"render", "install"} {
 		operation := action
 		var binary, role, config, listen, advertise string
-		var start bool
+		var start, discoverable bool
 		cmd := add(group, operation, "Controllerは専用ユーザー、Agentは信頼されたホスト管理プロセスとして動作", 0, func(c *cobra.Command, _ []string) error {
 			if binary == "" {
 				var e error
@@ -136,7 +139,7 @@ func (a *App) addService(root *cobra.Command) {
 					return e
 				}
 			}
-			name, unit, e := ServiceUnit(binary, role, a.State, config, listen, advertise)
+			name, unit, e := ServiceUnit(binary, role, a.State, config, listen, advertise, discoverable)
 			if e != nil {
 				return e
 			}
@@ -181,6 +184,9 @@ func (a *App) addService(root *cobra.Command) {
 					return errors.New("controller account must not be root")
 				}
 				if e = chownPrivateTree(a.State, uid, gid); e != nil {
+					return e
+				}
+				if e = lock.Close(); e != nil {
 					return e
 				}
 			} else {
@@ -232,6 +238,7 @@ func (a *App) addService(root *cobra.Command) {
 		cmd.Flags().StringVar(&config, "config", "", "Agentの場合は設定JSON")
 		cmd.Flags().StringVar(&listen, "listen", "127.0.0.1:8443", "Controllerの明示待受")
 		cmd.Flags().StringVar(&advertise, "advertise", "https://127.0.0.1:8443", "Nodeから見えるURL")
+		cmd.Flags().BoolVar(&discoverable, "discoverable", false, "ControllerをLAN自動発見の候補として案内する（avahi-utilsが必要）")
 		cmd.Flags().BoolVar(&start, "start", false, "install後にサービスを有効化して起動する")
 	}
 }

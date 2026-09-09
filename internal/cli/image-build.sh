@@ -6,7 +6,7 @@ VERSION=${2:-latest}
 [[ "$OUT" == /* && "$OUT" == *.qcow2 ]] || { echo 'Output must be an absolute .qcow2 path' >&2; exit 2; }
 [[ ! -e "$OUT" && ! -L "$OUT" && ! -e "$OUT.manifest.json" ]] || { echo 'Refusing to replace an existing image or manifest' >&2; exit 2; }
 [[ "$VERSION" == latest || "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid runner version' >&2; exit 2; }
-for tool in curl gpgv python3 qemu-img virt-resize virt-customize; do command -v "$tool" >/dev/null || { echo "Missing image-builder dependency: $tool" >&2; exit 2; }; done
+for tool in curl gpgv python3 qemu-img qemu-system-x86_64 cloud-localds timeout virt-resize virt-customize; do command -v "$tool" >/dev/null || { echo "Missing image-builder dependency: $tool" >&2; exit 2; }; done
 KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg
 [[ -r "$KEYRING" ]] || { echo 'Install ubuntu-keyring to verify Canonical cloud images' >&2; exit 2; }
 WORK=$(mktemp -d "$(dirname "$OUT")/.runnerloom-build-XXXXXXXX")
@@ -48,33 +48,69 @@ printf '%s  %s\n' "$(cat "$WORK/runner.sha256")" "$WORK/runner.tar.gz" | sha256s
 qemu-img create -f qcow2 "$WORK/golden.qcow2" 20G >&2
 export LIBGUESTFS_BACKEND=direct
 virt-resize --format qcow2 --output-format qcow2 --expand /dev/sda1 "$WORK/base.qcow2" "$WORK/golden.qcow2" >&2
-cat > "$WORK/provision.sh" <<'GUEST'
-#!/bin/bash
+# Package installation happens in a real, disposable build VM. libguestfs is
+# used only offline, avoiding distribution-specific passt privilege/namespace
+# failures without disabling AppArmor or modifying host networking.
+python3 - "$WORK" <<'PYSEED'
+import json,pathlib,sys
+p=pathlib.Path(sys.argv[1]);url=(p/'runner.url').read_text();digest=(p/'runner.sha256').read_text()
+script=r"""#!/bin/bash
 set -euo pipefail
+trap 'rc=$?; echo RUNNERLOOM_BUILD_EXIT=$rc; sync; sleep 2; systemctl poweroff --no-block' EXIT
 export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-venv build-essential jq sudo
 getent passwd runner >/dev/null || useradd --create-home --shell /bin/bash runner
 install -d -m 0755 /opt/actions-runner
-tar -xzf /tmp/runnerloom-runner.tar.gz -C /opt/actions-runner
+curl --fail --location --retry 3 --proto '=https' --tlsv1.2 '__URL__' -o /tmp/runner.tar.gz
+printf '%s  %s\n' '__DIGEST__' /tmp/runner.tar.gz | sha256sum --check -
+tar -xzf /tmp/runner.tar.gz -C /opt/actions-runner
 cd /opt/actions-runner
 ./bin/installdependencies.sh
 chown -R runner:runner /opt/actions-runner /home/runner
-runuser -u runner -- ./bin/Runner.Listener --version >/etc/runnerloom-runner-version
-rm -f /tmp/runnerloom-runner.tar.gz
-# Never capture any registration, SSH host identity or previous cloud-init state.
+runuser -u runner -- ./bin/Runner.Listener --version | tee /etc/runnerloom-runner-version
+rm -f /tmp/runner.tar.gz
 rm -f /opt/actions-runner/.runner /opt/actions-runner/.credentials /opt/actions-runner/.credentials_rsaparams
-rm -f /etc/ssh/ssh_host_*
-systemctl disable ssh.service ssh.socket 2>/dev/null || true
+apt-get clean
+rm -rf /var/lib/apt/lists/*
+echo RUNNERLOOM_GOLDEN_BUILD_COMPLETE
+""".replace('__URL__',url).replace('__DIGEST__',digest)
+config={'ssh_pwauth':False,'disable_root':True,'bootcmd':[['systemctl','mask','--now','serial-getty@ttyS0.service'],['systemctl','mask','--now','ssh.service','ssh.socket']],'write_files':[{'path':'/usr/local/sbin/runnerloom-image-build','permissions':'0700','content':script}],'runcmd':[['bash','-c','exec /usr/local/sbin/runnerloom-image-build >/dev/ttyS0 2>&1']]}
+# JSON is valid YAML; the cloud-config header selects cloud-init's parser.
+(p/'build-user-data').write_text('#cloud-config\n'+json.dumps(config))
+(p/'build-meta-data').write_text('instance-id: runnerloom-image-builder\nlocal-hostname: runnerloom-image-builder\n')
+PYSEED
+cloud-localds "$WORK/build-seed.iso" "$WORK/build-user-data" "$WORK/build-meta-data"
+echo 'Booting a disposable image builder (no SSH, no incoming ports)...' >&2
+CPU_MODEL=max
+if [[ -r /dev/kvm && -w /dev/kvm ]]; then CPU_MODEL=host; fi
+set +e
+timeout --signal=TERM --kill-after=30s 30m qemu-system-x86_64 \
+  -machine q35,accel=kvm:tcg -cpu "$CPU_MODEL" -smp 2 -m 2048 \
+  -display none -monitor none -serial "file:$WORK/build.log" -no-reboot \
+  -drive "file=$WORK/golden.qcow2,if=virtio,format=qcow2,cache=none" \
+  -drive "file=$WORK/build-seed.iso,if=virtio,format=raw,readonly=on" \
+  -netdev user,id=buildernet -device virtio-net-pci,netdev=buildernet \
+  -device virtio-rng-pci
+BUILD_STATUS=$?
+set -e
+if [[ "$BUILD_STATUS" != 0 ]] || ! grep -q '^RUNNERLOOM_GOLDEN_BUILD_COMPLETE' "$WORK/build.log"; then
+  tail -n 160 "$WORK/build.log" >&2 || true
+  echo 'Image-builder VM did not complete successfully; nothing is published' >&2
+  exit 1
+fi
+tail -n 40 "$WORK/build.log" >&2
+cat > "$WORK/clean.sh" <<'CLEAN'
+#!/bin/bash
+set -euo pipefail
+rm -f /usr/local/sbin/runnerloom-image-build /etc/ssh/ssh_host_*
 cloud-init clean --logs --machine-id
 : >/etc/machine-id
 rm -f /var/lib/dbus/machine-id
 ln -s /etc/machine-id /var/lib/dbus/machine-id
-apt-get clean
-rm -rf /var/lib/apt/lists/*
-GUEST
-virt-customize --format qcow2 -a "$WORK/golden.qcow2" --memsize 2048 --smp 2 \
-  --install ca-certificates,curl,git,python3,python3-venv,build-essential,jq,sudo \
-  --upload "$WORK/runner.tar.gz:/tmp/runnerloom-runner.tar.gz" \
-  --run "$WORK/provision.sh" >&2
+rm -f /opt/actions-runner/.runner /opt/actions-runner/.credentials /opt/actions-runner/.credentials_rsaparams
+CLEAN
+virt-customize --no-network --format qcow2 -a "$WORK/golden.qcow2" --memsize 2048 --run "$WORK/clean.sh" >&2
 qemu-img check -f qcow2 "$WORK/golden.qcow2" >&2
 python3 - "$WORK" "$OUT" <<'PY'
 import datetime,hashlib,json,os,pathlib,sys
