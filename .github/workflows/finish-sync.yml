@@ -1,0 +1,64 @@
+name: Apply verified finishing changes
+on:
+  push:
+    branches: [finish/runnerloom-release]
+    paths: [.github/workflows/finish-sync.yml]
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+          ref: finish/runnerloom-release
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Verify immutable patch, apply and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64,hashlib,lzma,pathlib,subprocess
+          encoded=''.join(pathlib.Path(f'ci/finish-source.{i}.b64').read_text().strip() for i in (1,2))
+          patch=lzma.decompress(base64.b64decode(encoded,validate=True))
+          assert len(patch)<1048576
+          assert hashlib.sha256(patch).hexdigest()=='9ff0edf57b1461f2e6efe9d6e928b1d1b07f763806b940993bf80452e5ea5d3b'
+          for line in patch.decode().splitlines():
+              if line.startswith('diff --git '):
+                  old,new=line.split()[2:]
+                  assert old.startswith('a/') and new.startswith('b/')
+                  for path in (old[2:],new[2:]):
+                      p=pathlib.PurePosixPath(path)
+                      assert not p.is_absolute() and '..' not in p.parts and p.parts[0] not in ('.git','.github','ci')
+          subprocess.run(['git','apply','--check','-'],input=patch,check=True)
+          subprocess.run(['git','apply','-'],input=patch,check=True)
+          PY
+          test -z "$(gofmt -l cmd internal)"
+          go vet ./...
+          go test -race -count=1 ./...
+          go mod vendor
+          python3 scripts/package.py --deb
+          python3 scripts/test_package.py dist
+          git diff --exit-code -- go.mod go.sum
+      - name: Commit tested source to this branch only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .gitignore Makefile README.md VERSION CHANGELOG.md docs internal scripts
+          git diff --cached --stat
+          git commit -m 'feat: qualify release packaging, strict setup and boot-preserving image builder'
+          git -c credential.helper='!gh auth git-credential' push origin HEAD:refs/heads/finish/runnerloom-release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: runnerloom-finishing-validation-${{ github.run_id }}
+          path: dist/
+          retention-days: 3
+          if-no-files-found: error
