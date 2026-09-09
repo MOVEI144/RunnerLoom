@@ -33,7 +33,7 @@ func TestLiveGitHubScaleSet(t *testing.T) {
 	token := strings.TrimSpace(string(b))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	client, e := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: origin, PersonalAccessToken: token, SystemInfo: scaleset.SystemInfo{System: "runnerloom", Version: "integration-test", Subsystem: "temporary-verification"}})
+	client, e := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: origin, PersonalAccessToken: token, SystemInfo: scaleset.SystemInfo{System: "runnerloom", Version: "integration-test", Subsystem: "temporary-verification"}}, scaleset.WithRetryableHTTPClint(newScaleSetHTTPClient()))
 	if e != nil {
 		t.Fatal("live client initialization failed")
 	}
@@ -54,7 +54,7 @@ func TestLiveGitHubScaleSet(t *testing.T) {
 			t.Logf("temporary scale set %d removed", set.ID)
 		}
 	})
-	session, e := client.MessageSessionClient(ctx, set.ID, "runnerloom-verification")
+	session, e := client.MessageSessionClient(ctx, set.ID, "runnerloom-verification", scaleset.WithRetryableHTTPClint(newScaleSetHTTPClient()))
 	if e != nil {
 		t.Fatal("live listener session creation failed")
 	}
