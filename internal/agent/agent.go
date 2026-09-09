@@ -54,7 +54,7 @@ func (c Config) Validate() error {
 			return errors.New("node paths must be normalized absolute paths")
 		}
 	}
-	if c.StateDir == c.DiskDir || strings.HasPrefix(c.DiskDir, c.StateDir+"/") {
+	if c.StateDir == c.DiskDir || strings.HasPrefix(c.DiskDir, c.StateDir+"/") || strings.HasPrefix(c.StateDir, c.DiskDir+"/") {
 		return errors.New("VM disk directory must be outside the private agent state directory")
 	}
 	return nil
@@ -368,7 +368,7 @@ func (a *Agent) download(ctx context.Context, im core.Image) error {
 	}
 	// Separate client for bounded streaming; credential/TLS/redirect policy retained.
 	httpClient := *a.Client.HTTP
-	httpClient.Timeout = 30 * time.Minute
+	httpClient.Timeout = core.ImageTransferTimeout
 	r, e := http.NewRequestWithContext(ctx, http.MethodGet, a.Config.Controller+"/v1/images/"+strings.TrimPrefix(im.Digest, "sha256:"), nil)
 	if e != nil {
 		return e

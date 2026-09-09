@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,9 @@ func TestLiveGitHubScaleSet(t *testing.T) {
 	if tokenFile == "" || origin == "" {
 		t.Skip("explicit live GitHub credentials not provided")
 	}
+	if !validLiveOrigin(origin) {
+		t.Fatal("live GitHub URL must use HTTPS without userinfo, query or fragment")
+	}
 	b, e := core.ReadSecret(tokenFile)
 	if e != nil {
 		t.Fatal("cannot read live test credential")
@@ -29,7 +33,7 @@ func TestLiveGitHubScaleSet(t *testing.T) {
 	token := strings.TrimSpace(string(b))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	client, e := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: origin, PersonalAccessToken: token, SystemInfo: scaleset.SystemInfo{System: "runnerloom", Version: "integration-test", Subsystem: "temporary-verification"}})
+	client, e := scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: origin, PersonalAccessToken: token, SystemInfo: scaleset.SystemInfo{System: "runnerloom", Version: "integration-test", Subsystem: "temporary-verification"}}, scaleset.WithRetryableHTTPClint(newScaleSetHTTPClient()))
 	if e != nil {
 		t.Fatal("live client initialization failed")
 	}
@@ -50,7 +54,7 @@ func TestLiveGitHubScaleSet(t *testing.T) {
 			t.Logf("temporary scale set %d removed", set.ID)
 		}
 	})
-	session, e := client.MessageSessionClient(ctx, set.ID, "runnerloom-verification")
+	session, e := client.MessageSessionClient(ctx, set.ID, "runnerloom-verification", scaleset.WithRetryableHTTPClint(newScaleSetHTTPClient()))
 	if e != nil {
 		t.Fatal("live listener session creation failed")
 	}
@@ -93,4 +97,20 @@ func TestLiveGitHubScaleSet(t *testing.T) {
 		}
 	}
 	t.Log("LIVE: scale-set, listener, JIT, identity lookup and runner removal verified; no token or JIT printed")
+}
+
+func validLiveOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && u.RawQuery == "" && u.Fragment == ""
+}
+
+func TestLiveOriginRequiresHTTPS(t *testing.T) {
+	for _, origin := range []string{"http://github.com/org", "ftp://github.com/org", "https://", "https://token@github.com/org", "https://github.com/org?x=y", "https://github.com/org#fragment"} {
+		if validLiveOrigin(origin) {
+			t.Fatalf("insecure live origin accepted: %q", origin)
+		}
+	}
+	if !validLiveOrigin("https://github.com/organization") {
+		t.Fatal("valid live origin refused")
+	}
 }

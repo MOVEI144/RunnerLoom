@@ -60,7 +60,7 @@ type auth struct {
 }
 
 func newAuth(c Credentials) *auth {
-	return &auth{Credentials: c, HTTP: &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("GitHub API redirects are forbidden") }}}
+	return &auth{Credentials: c, HTTP: &http.Client{Timeout: 30 * time.Second, CheckRedirect: rejectGitHubRedirect}}
 }
 func (a *auth) Token(ctx context.Context) (string, error) {
 	a.mu.Lock()
@@ -151,7 +151,12 @@ func (a *auth) CheckAccess(ctx context.Context, c core.Config) error {
 			Private  bool   `json:"private"`
 			FullName string `json:"full_name"`
 		}
-		if e := a.get(ctx, "/repos/"+repo, &r); e != nil {
+		owner, name, ok := strings.Cut(repo, "/")
+		if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+			return core.Fail("INVALID_CONFIG", "Repositoryはowner/name形式で指定してください", nil)
+		}
+		path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
+		if e := a.get(ctx, path, &r); e != nil {
 			return e
 		}
 		if !r.Private || !strings.EqualFold(r.FullName, repo) {
@@ -240,7 +245,7 @@ func New(s *core.Store, c core.Config) (*Manager, error) {
 		if e != nil {
 			return nil, e
 		}
-		client, e = scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: c.GitHub.URL, PersonalAccessToken: strings.TrimSpace(string(b)), SystemInfo: info})
+		client, e = scaleset.NewClientWithPersonalAccessToken(scaleset.NewClientWithPersonalAccessTokenConfig{GitHubConfigURL: c.GitHub.URL, PersonalAccessToken: strings.TrimSpace(string(b)), SystemInfo: info}, scaleset.WithRetryableHTTPClint(newScaleSetHTTPClient()))
 		if e != nil {
 			return nil, errors.New("cannot configure GitHub scale-set client")
 		}
@@ -249,7 +254,7 @@ func New(s *core.Store, c core.Config) (*Manager, error) {
 		if e != nil {
 			return nil, e
 		}
-		client, e = scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{GitHubConfigURL: c.GitHub.URL, GitHubAppAuth: scaleset.GitHubAppAuth{ClientID: credentials.ClientID, InstallationID: credentials.InstallationID, PrivateKey: string(key)}, SystemInfo: info})
+		client, e = scaleset.NewClientWithGitHubApp(scaleset.ClientWithGitHubAppConfig{GitHubConfigURL: c.GitHub.URL, GitHubAppAuth: scaleset.GitHubAppAuth{ClientID: credentials.ClientID, InstallationID: credentials.InstallationID, PrivateKey: string(key)}, SystemInfo: info}, scaleset.WithRetryableHTTPClint(newScaleSetHTTPClient()))
 		if e != nil {
 			return nil, errors.New("cannot configure GitHub App scale-set client")
 		}
@@ -349,7 +354,7 @@ func PersistThenAcknowledge(ctx context.Context, s *core.Store, session string, 
 	return ack(ctx, msg.MessageID)
 }
 func (m *Manager) listen(ctx context.Context, p core.Pool, b Binding) error {
-	session, e := m.Client.MessageSessionClient(ctx, b.ScaleSetID, "runnerloom-"+m.Config.Name+"-"+p.Name)
+	session, e := m.Client.MessageSessionClient(ctx, b.ScaleSetID, "runnerloom-"+m.Config.Name+"-"+p.Name, scaleset.WithRetryableHTTPClint(newScaleSetHTTPClient()))
 	if e != nil {
 		return errors.New("scale-set listener session failed")
 	}

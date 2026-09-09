@@ -1,0 +1,103 @@
+name: RunnerLoom runtime qualification (not live GitHub)
+
+on:
+  push:
+    branches: [main, test/runnerloom-e2e-20260909]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runnerloom-e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prerequisites:
+    name: Live GitHub prerequisites ONLY (not execution)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Record dedicated credential availability
+        env:
+          E2E_PAT: ${{ secrets.RUNNERLOOM_E2E_PAT }}
+          E2E_APP_CLIENT_ID: ${{ secrets.RUNNERLOOM_E2E_APP_CLIENT_ID }}
+          E2E_APP_INSTALLATION_ID: ${{ secrets.RUNNERLOOM_E2E_APP_INSTALLATION_ID }}
+          E2E_APP_PRIVATE_KEY: ${{ secrets.RUNNERLOOM_E2E_APP_PRIVATE_KEY }}
+        run: |
+          mkdir -p evidence
+          python3 - <<'PY'
+          import json, os, pathlib
+          app = all(os.environ.get(n) for n in ('E2E_APP_CLIENT_ID','E2E_APP_INSTALLATION_ID','E2E_APP_PRIVATE_KEY'))
+          pat = bool(os.environ.get('E2E_PAT'))
+          report = {'commit': os.environ['GITHUB_SHA'], 'live_github_e2e': 'not_run', 'dedicated_app_available': app, 'dedicated_pat_available': pat, 'home_node': 'not_connected_from_this_run', 'reason': 'Dedicated credentials available; live execution still required' if app or pat else 'No dedicated RUNNERLOOM_E2E credentials configured; GITHUB_TOKEN is not substituted for Organization runner administration'}
+          pathlib.Path('evidence/prerequisites.json').write_text(json.dumps(report, indent=2)+'\n')
+          print(json.dumps(report, indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('## Live GitHub E2E: NOT RUN\n\n'+report['reason']+'\n\nThe separate runtime job uses explicit GitHub/workload fixtures. It is not a live GitHub or home-cluster acceptance test.\n')
+          PY
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always()
+        with:
+          name: e2e-prerequisites-${{ github.run_id }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
+
+  runtime:
+    name: Build image, enroll Node, run two REAL VMs and verify cleanup
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Compile and test the exact source
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l internal/e2e internal/cli/image_shell_test.go)"
+          go vet ./...
+          go test -race -count=1 ./...
+          mkdir -p dist
+          CGO_ENABLED=0 go build -trimpath -o dist/runnerloom ./cmd/runnerloom
+          go test -c -o dist/runtime-e2e.test ./internal/e2e
+      - name: Prepare the disposable host without weakening resource checks
+        run: |
+          bash scripts/ci-free-space.sh
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-kvm qemu-utils libvirt-daemon-system libvirt-clients cloud-image-utils nftables ubuntu-keyring gpgv dnsmasq-base libguestfs-tools
+          sudo systemctl start libvirtd
+          mkdir -p "$RUNNER_TEMP/e2e-evidence"
+      - name: Build the verified unregistered official-Runner image
+        run: |
+          set -euo pipefail
+          sudo install -d -m 0700 /var/lib/runnerloom-e2e-build
+          sudo ./dist/runnerloom image build --out /var/lib/runnerloom-e2e-build/runner.qcow2 --json 2>&1 | tee "$RUNNER_TEMP/e2e-evidence/image-build.log"
+          sudo cp /var/lib/runnerloom-e2e-build/runner.qcow2.manifest.json "$RUNNER_TEMP/e2e-evidence/image-manifest.json"
+      - name: Real runtime integration with EXPLICIT GitHub and workload fixtures
+        run: |
+          set -euo pipefail
+          sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted GITHUB_SHA="$GITHUB_SHA" RUNNERLOOM_REAL_RUNTIME_E2E=1 RUNNERLOOM_E2E_IMAGE=/var/lib/runnerloom-e2e-build/runner.qcow2 RUNNERLOOM_E2E_EVIDENCE="$RUNNER_TEMP/e2e-evidence" ./dist/runtime-e2e.test -test.v -test.run '^TestControllerAgentRealVMLifecycle$' -test.timeout 20m 2>&1 | tee "$RUNNER_TEMP/e2e-evidence/runtime.log"
+          sudo test -s "$RUNNER_TEMP/e2e-evidence/runtime-result.json"
+      - name: Record the tested boundary and diagnostics
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e-evidence"
+          sudo virsh -c qemu:///system list --all > "$RUNNER_TEMP/e2e-evidence/domains-after.txt" 2>&1 || true
+          sudo journalctl -u libvirtd --no-pager -n 80 > "$RUNNER_TEMP/e2e-evidence/libvirt.log" 2>&1 || true
+          for d in /var/lib/e2e-*/node/logs; do
+            if sudo test -d "$d"; then sudo find "$d" -maxdepth 1 -type f -name '*.log' -exec cp '{}' "$RUNNER_TEMP/e2e-evidence/" \;; fi
+          done
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/e2e-evidence"
+          printf '## Qualification boundary\n\nController, enrolled Agent, SQLite, TLS, real libvirt VMs, image and disk cleanup are tested. GitHub queue/JIT responses and the guest workload are explicit diagnostic fixtures. Live GitHub job execution and home-PC deployment are NOT claimed.\n' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        if: always()
+        with:
+          name: e2e-runtime-${{ github.run_id }}
+          path: ${{ runner.temp }}/e2e-evidence/
+          retention-days: 7
+          if-no-files-found: error

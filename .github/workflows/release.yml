@@ -1,0 +1,98 @@
+name: Publish verified release
+on:
+  workflow_run:
+    workflows: [RunnerLoom CI]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: runnerloom-release-main
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.id == github.event.repository.id
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    env:
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      SOURCE_RUN: ${{ github.event.workflow_run.id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require all qualification jobs and a trusted main commit
+        run: |
+          set -euo pipefail
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN/jobs?per_page=100" > "$RUNNER_TEMP/jobs.json"
+          python3.12 - <<'PY'
+          import json,os,pathlib
+          jobs=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'jobs.json').read_text())['jobs']
+          required={'Go, race, integration and CLI','Real Ubuntu VM lifecycle','Build verified runner image and boot it'}
+          for name in required:
+              matches=[j for j in jobs if j['name']==name]
+              assert len(matches)==1 and matches[0]['conclusion']=='success',f'Qualification missing: {name}'
+          PY
+      - name: Download only artifacts from the qualified main run
+        run: gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --name "runnerloom-release-bundle-$SOURCE_SHA" --dir dist
+      - name: Validate version, source identity and every asset checksum
+        run: |
+          python3.12 - <<'PY'
+          import hashlib,json,os,pathlib,re
+          root=pathlib.Path('dist');version=pathlib.Path('VERSION').read_text().strip()
+          assert re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[a-z0-9]+(?:\.[a-z0-9]+)*)?',version)
+          names={f'runnerloom-{version}-linux-amd64.tar.gz',f'runnerloom_{version.replace("-","~",1)}_amd64.deb',f'runnerloom-{version}-buildinfo.json'}
+          assert {p.name for p in root.iterdir()}==names|{'SHA256SUMS'}
+          info=json.loads((root/f'runnerloom-{version}-buildinfo.json').read_text())
+          assert info['sourceCommit']==os.environ['SOURCE_SHA'] and info['version']==version
+          checked=set()
+          for line in (root/'SHA256SUMS').read_text().splitlines():
+              digest,name=line.split('  ',1)
+              assert name in names and name not in checked
+              with (root/name).open('rb') as f:assert hashlib.file_digest(f,'sha256').hexdigest()==digest
+              checked.add(name)
+          assert checked==names
+          pathlib.Path(os.environ['RUNNER_TEMP'],'release-version').write_text(version)
+          notes=f'''## RunnerLoom {version}
+
+          Linux/amd64 CPU/LAN release candidate. Includes versioned archive, Debian package, build information and SHA-256 checksums.
+
+          Source: `{os.environ['SOURCE_SHA']}`
+          Qualification: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['SOURCE_RUN']}
+
+          Qualification includes race/integration tests, package extraction tests, a shipped-binary vulnerability scan, an actual Ubuntu VM lifecycle, and building and booting an unregistered official-Runner image.
+
+          Installation does not enable services or alter host networking. See docs/INSTALL.md and docs/QUICKSTART.ja.md.
+
+          A dedicated GitHub App, private-repository policy and a successful first job on your own host are deployment acceptance requirements. GPU, hostile public PRs, Controller HA and an independently audited privilege-separated host helper are not qualified.
+          '''
+          pathlib.Path('release-notes.md').write_text(notes)
+          PY
+      - name: Publish without replacing an existing version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(cat "$RUNNER_TEMP/release-version")
+          tag="v$version"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Version $tag is already published; leaving it unchanged."
+            exit 0
+          fi
+          if git show-ref --verify --quiet "refs/tags/$tag"; then
+            test "$(git rev-parse "$tag^{commit}")" = "$SOURCE_SHA"
+          fi
+          args=(--repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --title "RunnerLoom $version" --notes-file release-notes.md)
+          if [[ "$version" == *-* ]]; then args+=(--prerelease --latest=false); fi
+          gh release create "$tag" dist/*.tar.gz dist/*.deb dist/*-buildinfo.json dist/SHA256SUMS "${args[@]}"

@@ -4,7 +4,7 @@
 
 RunnerLoom provisions a fresh Ubuntu VM for each GitHub Actions job, places it on an eligible LAN server, and removes the VM after the host confirms completion. One machine can be both controller and worker; additional workers use the same CLI and connect outbound over mutually authenticated TLS.
 
-[日本語セットアップガイド](docs/QUICKSTART.ja.md) · [Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md) · [Verification and limitations](docs/VERIFICATION.md)
+[Install / upgrade](docs/INSTALL.md) · [日本語セットアップガイド](docs/QUICKSTART.ja.md) · [Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md) · [Verification and limitations](docs/VERIFICATION.md)
 
 ```text
 GitHub Actions — outbound HTTPS — Controller
@@ -37,6 +37,18 @@ jobs:
       - run: python3 --version
 ```
 
+## Install
+
+Download the versioned `linux-amd64.tar.gz` or `.deb` from Releases and verify `SHA256SUMS`. Go is not needed for a packaged binary. Installation **does not** start services, enroll a node or modify networking. The private repository must first be made public by its owner before anonymous downloads work.
+
+```bash
+runnerloom version --json
+runnerloom doctor
+runnerloom config schema > cluster.schema.json
+```
+
+See [installation, verification and safe upgrades](docs/INSTALL.md).
+
 ## Start here
 
 Use the [Japanese quickstart](docs/QUICKSTART.ja.md) for the complete sequence, required host packages, GitHub permissions and storage layout. `setup` does not falsely claim that writing a configuration has completed GitHub or VM verification.
@@ -63,7 +75,7 @@ CI additionally runs a real disposable Ubuntu VM on a GitHub-owned ephemeral run
 
 ## Support boundary
 
-This is an early operational release, not a claim of complete production qualification or hostile multi-tenant security. The current target is **Ubuntu 24.04 x86_64, trusted administrators and explicitly allowed private repositories**. GPU passthrough, Windows/macOS hosts, automatic controller HA and public fork jobs are not enabled. Guest isolation does not protect against an already-compromised host administrator or every hypervisor vulnerability.
+This is a release candidate, not a claim of complete production qualification or hostile multi-tenant security. The current target is **Ubuntu 24.04 x86_64, trusted administrators and explicitly allowed private repositories**. GPU passthrough, Windows/macOS hosts, automatic controller HA and public fork jobs are not enabled. Guest isolation does not protect against an already-compromised host administrator or every hypervisor vulnerability.
 
 Read [SECURITY.md](SECURITY.md) before connecting repositories or granting an agent host privileges. Repository visibility is an owner decision; adding an OSS license does not automatically publish a private repository.
 

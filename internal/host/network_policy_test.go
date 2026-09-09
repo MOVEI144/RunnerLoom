@@ -28,8 +28,8 @@ func TestNetworkSecurityDriftPreservesIdentityButMustFail(t *testing.T) {
 				t.Fatal(e)
 			}
 			fake.NetworkXML = mutate(fake.NetworkXML)
-			if e := n.Check(context.Background()); e == nil {
-				t.Fatal("security drift accepted with same network UUID")
+			if e := n.Check(context.Background()); e == nil || !strings.Contains(e.Error(), "libvirt network security policy drift") {
+				t.Fatalf("unexpected network drift result: %v", e)
 			}
 		})
 	}
@@ -38,7 +38,7 @@ func TestNetworkSecurityDriftPreservesIdentityButMustFail(t *testing.T) {
 func TestHostRouteConflictsWithVMSubnet(t *testing.T) {
 	n, fake := networkFixture(t)
 	fake.Routes = `[{"dst":"172.30.240.91","dev":"eth0"}]`
-	if e := n.Apply(context.Background()); e == nil {
-		t.Fatal("host route inside VM subnet was ignored")
+	if e := n.Apply(context.Background()); e == nil || !strings.Contains(e.Error(), "VM subnet conflicts with existing route") {
+		t.Fatalf("unexpected route conflict result: %v", e)
 	}
 }

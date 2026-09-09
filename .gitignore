@@ -11,3 +11,7 @@
 .env
 /node-state/
 /controller-state/
+
+/vendor/
+*.deb
+*.tar.gz

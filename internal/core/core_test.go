@@ -258,6 +258,7 @@ func TestSequenceFenceSurvivesAgentRestart(t *testing.T) {
 }
 func TestPlanConflictAndReplay(t *testing.T) {
 	s, c := testStore(t)
+	c.Pools[0].WarmIdle = 1 // A real mutation, not an idempotent no-op.
 	a, e := s.Plan(ctx, c)
 	if e != nil {
 		t.Fatal(e)

@@ -25,6 +25,7 @@ import (
 )
 
 var Version = "0.1.0-dev"
+var Commit = "development"
 
 type App struct {
 	State          string
@@ -36,6 +37,11 @@ type App struct {
 }
 
 func (a *App) output(v any) error {
+	if !a.JSON {
+		if handled, e := humanOutput(a.Out, v); handled {
+			return e
+		}
+	}
 	e := json.NewEncoder(a.Out)
 	e.SetIndent("", "  ")
 	if a.JSON {
@@ -90,7 +96,7 @@ func (a *App) Command() *cobra.Command {
 		_ = a.output(map[string]any{"version": Version, "commands": commands, "exitCodes": map[string]int{"ok": 0, "invalidInput": 2, "operationFailed": 3, "authorization": 4, "conflict": 5}})
 	})
 	add(root, "version", "バージョンを表示", 0, func(*cobra.Command, []string) error {
-		return a.output(map[string]string{"version": Version, "configVersion": core.Version})
+		return a.output(map[string]string{"version": Version, "configVersion": core.Version, "commit": Commit})
 	})
 	add(root, "doctor", "ホスト環境を読み取り診断する（設定変更なし）", 0, func(*cobra.Command, []string) error { return a.output(core.Doctor()) })
 	add(root, "status", "宣言設定・Node・VM・GitHub需要を表示", 0, func(c *cobra.Command, _ []string) error {
@@ -279,14 +285,17 @@ func (a *App) Command() *cobra.Command {
 		if e != nil {
 			return e
 		}
+		if _, e = os.Lstat(inviteOut); !os.IsNotExist(e) {
+			return errors.New("招待の保存先は新規ファイルにしてください")
+		}
+		if e = core.PrivateDir(filepath.Dir(inviteOut)); e != nil {
+			return e
+		}
 		v, e := s.Invite(c.Context(), ca, endpoint, ttl)
 		if e != nil {
 			return e
 		}
 		b, _ := json.MarshalIndent(v, "", "  ")
-		if _, e = os.Lstat(inviteOut); !os.IsNotExist(e) {
-			return errors.New("招待の保存先は新規ファイルにしてください")
-		}
 		if e = core.WritePrivate(inviteOut, b); e != nil {
 			return e
 		}
@@ -536,6 +545,7 @@ func (a *App) Command() *cobra.Command {
 	_ = adopt.MarkFlagRequired("pool")
 	_ = adopt.MarkFlagRequired("id")
 	a.addOperations(root)
+	a.addMaintenance(root)
 	a.addSetup(root)
 	a.addService(root)
 	a.addSmoke(root)
@@ -557,7 +567,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errout io.Writer
 			_, _ = fmt.Fprintln(errout, fault.Error())
 		}
 		switch fault.Code {
-		case "INVALID_CONFIG", "INVALID_JSON", "NOT_CONFIGURED":
+		case "INVALID_CONFIG", "INVALID_JSON", "NOT_CONFIGURED", "MISSING_INPUT":
 			return 2
 		case "NODE_UNAUTHORIZED", "INVITE_INVALID":
 			return 4

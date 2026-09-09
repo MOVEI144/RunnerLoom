@@ -18,7 +18,7 @@ import (
 )
 
 func systemdArg(s string) (string, error) {
-	if strings.ContainsAny(s, "\x00\r\n%") || s == "" {
+	if strings.ContainsAny(s, "\x00\r\n%$") || s == "" {
 		return "", errors.New("unsafe systemd argument")
 	}
 	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`, nil

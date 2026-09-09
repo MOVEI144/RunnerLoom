@@ -4,6 +4,8 @@ RunnerLoomは「GitHubが受け付けた仕事に合わせて、自分のPC上�
 
 まずは非公開Repositoryと、CPU用のUbuntu VMで始めてください。GPUの割り当て、Windows/macOSホスト、Controllerの自動二重化はこの版の対象外です。GitHub-hostedと同じソフトウェア全部入りのイメージではありません。
 
+配布物の入手・チェックサム検証・更新方法は [Install / upgrade](INSTALL.md) に記載しています。まず `runnerloom version --json` で版とソースコミットを確認してください。
+
 ## 1. 必要なもの
 
 ホストはUbuntu Server 24.04 x86_64を想定しています。BIOS/UEFIで仮想化支援を有効にしてください。CLIの配布バイナリを使う場合、Goのインストールは不要です。

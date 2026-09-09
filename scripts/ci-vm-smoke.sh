@@ -2,7 +2,10 @@
 set -euo pipefail
 # This wrapper intentionally runs ONLY on GitHub-owned ephemeral CI hosts.
 # The public `runnerloom smoke-vm` command is the explicit local equivalent.
-[[ "${GITHUB_ACTIONS:-}" == "true" ]] || { echo 'CI wrapper requires GitHub Actions' >&2; exit 2; }
+[[ "${GITHUB_ACTIONS:-}" == true && "${RUNNER_ENVIRONMENT:-}" == github-hosted ]] || {
+  echo 'CI wrapper requires a disposable GitHub-hosted runner' >&2
+  exit 2
+}
 ROOT="${RUNNER_TEMP:?}/runnerloom-real-vm"
 EVIDENCE="${RUNNER_TEMP}/runnerloom-evidence"
 STATE="/var/lib/runnerloom-ci-${GITHUB_RUN_ID:?}-${GITHUB_RUN_ATTEMPT:-1}"
@@ -20,11 +23,13 @@ finish() {
 }
 trap finish EXIT
 if [[ -n "${RUNNERLOOM_SMOKE_IMAGE:-}" ]]; then
-  sudo cp "$RUNNERLOOM_SMOKE_IMAGE" "$ROOT/base.qcow2"
-  sudo chown "$(id -u):$(id -g)" "$ROOT/base.qcow2"
-  SHA=$(sha256sum "$ROOT/base.qcow2" | awk '{print $1}')
+  # smoke-vm imports and verifies the image into its private cache. Avoid a
+  # redundant third copy, and leave the caller's artifact permissions unchanged.
+  IMAGE="$RUNNERLOOM_SMOKE_IMAGE"
+  SHA=$(sudo sha256sum -- "$IMAGE" | awk '{print $1}')
   printf '%s\n' "$SHA" > "$EVIDENCE/ubuntu-image.sha256"
 else
+IMAGE="$ROOT/base.qcow2"
 BASE='https://cloud-images.ubuntu.com/noble/current'
 curl --fail --location --retry 3 "$BASE/SHA256SUMS" -o "$ROOT/SHA256SUMS"
 curl --fail --location --retry 3 "$BASE/SHA256SUMS.gpg" -o "$ROOT/SHA256SUMS.gpg"
@@ -46,7 +51,7 @@ sudo ./dist/runnerloom network plan --config "$STATE/agent.json" --json > "$EVID
 sudo ./dist/runnerloom network apply --config "$STATE/agent.json" --json > "$EVIDENCE/network-apply.json"
 MODE=()
 if [[ ! -c /dev/kvm ]]; then MODE=(--tcg); fi
-sudo ./dist/runnerloom smoke-vm --config "$STATE/agent.json" --image "$ROOT/base.qcow2" --digest "sha256:$SHA" --timeout 15m "${MODE[@]}" --json > "$EVIDENCE/vm-smoke.json"
+sudo ./dist/runnerloom smoke-vm --config "$STATE/agent.json" --image "$IMAGE" --digest "sha256:$SHA" --timeout 15m "${MODE[@]}" --json > "$EVIDENCE/vm-smoke.json"
 python3 - "$EVIDENCE/vm-smoke.json" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1]))
