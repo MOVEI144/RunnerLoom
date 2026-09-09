@@ -293,14 +293,20 @@ func Decode(r io.Reader, dst any) error {
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.UseNumber()
 	if e = unique(d, 0); e != nil {
-		return e
+		return Fail("INVALID_JSON", "JSONの構文または重複キーを確認してください", nil)
 	}
 	if _, e = d.Token(); e != io.EOF {
-		return errors.New("trailing JSON value")
+		return Fail("INVALID_JSON", "JSONの後ろに余分な値があります", nil)
+	}
+	if e = exactFields(b, dst); e != nil {
+		return e
 	}
 	d = json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
-	return d.Decode(dst)
+	if e = d.Decode(dst); e != nil {
+		return Fail("INVALID_JSON", "JSONの型または項目を確認してください", nil)
+	}
+	return nil
 }
 func unique(d *json.Decoder, depth int) error {
 	if depth > 64 {

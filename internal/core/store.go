@@ -320,7 +320,7 @@ func (s *Store) Apply(ctx context.Context, id string) (revision int64, err error
 		if s.Now().Unix() >= expires {
 			return Fail("PLAN_EXPIRED", "変更計画を作り直してください", nil)
 		}
-		_, r, e := readConfig(ctx, tx)
+		previous, r, e := readConfig(ctx, tx)
 		if e != nil {
 			return e
 		}
@@ -341,12 +341,20 @@ func (s *Store) Apply(ctx context.Context, id string) (revision int64, err error
 		if e = checkCapacityUpdate(c, runs); e != nil {
 			return e
 		}
+		if Fingerprint(previous) == Fingerprint(c) {
+			revision = r
+			_, e = tx.ExecContext(ctx, "UPDATE plans SET applied=? WHERE id=?", revision, id)
+			return e
+		}
 		revision = r + 1
 		_, e = tx.ExecContext(ctx, "INSERT INTO settings(id,revision,payload) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload", revision, b)
 		if e != nil {
 			return e
 		}
-		_, e = tx.ExecContext(ctx, "UPDATE plans SET applied=? WHERE id=?", revision, id)
+		if _, e = tx.ExecContext(ctx, "UPDATE plans SET applied=? WHERE id=?", revision, id); e != nil {
+			return e
+		}
+		_, e = tx.ExecContext(ctx, "INSERT INTO audit(at,event,target) VALUES(?,?,?)", s.Now().Unix(), "config.apply", fmt.Sprintf("revision:%d", revision))
 		return e
 	})
 	return

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -84,6 +85,9 @@ func (a *App) wizard(r *bufio.Reader) (core.Config, error) {
 	if e != nil {
 		return c, e
 	}
+	if dedicated != "yes" && dedicated != "no" {
+		return c, core.Fail("INVALID_CONFIG", "専用・兼用はyesまたはnoを指定してください", nil)
+	}
 	budget := core.SuggestedResources(dedicated == "yes")
 	for _, field := range []struct {
 		label  string
@@ -97,6 +101,9 @@ func (a *App) wizard(r *bufio.Reader) (core.Config, error) {
 		if e != nil {
 			return c, e
 		}
+	}
+	if !budget.Valid() || budget.Memory < 1024 || budget.Disk < 22 {
+		return c, core.Fail("INVALID_CONFIG", "VM用に1 vCPU・1024 MiB以上のRAM・22 GiB以上のディスクが必要です。OS用の余裕は別に残してください", nil)
 	}
 	n.Budget = budget
 	n.LocalCeiling = budget
@@ -176,6 +183,29 @@ func (a *App) addSetup(root *cobra.Command) {
 		if e != nil {
 			return e
 		}
+		var local *agent.Config
+		if role == "controller-node" {
+			chosen := nodeName
+			if chosen == "" && len(conf.Nodes) > 0 {
+				chosen = conf.Nodes[0].Name
+			}
+			n, ok := conf.Node(chosen)
+			if !ok {
+				return core.Fail("INVALID_CONFIG", "指定Nodeが設定にありません", chosen)
+			}
+			nd, dd := nodeDir, diskDir
+			if nd == "" {
+				nd = a.State + "-node"
+			}
+			if dd == "" {
+				dd = "/var/lib/libvirt/images/runnerloom-" + conf.Name + "-" + chosen
+			}
+			nc := agent.Config{Node: chosen, Cluster: conf.Name, Controller: advertise, StateDir: nd, DiskDir: dd, NetworkCIDR: cidr, Ceiling: n.LocalCeiling, CacheGiB: 100, QEMUUser: "libvirt-qemu"}
+			if e = nc.Validate(); e != nil {
+				return e
+			}
+			local = &nc
+		}
 		s, e := a.store()
 		if e != nil {
 			return e
@@ -205,31 +235,11 @@ func (a *App) addSetup(root *cobra.Command) {
 			return e
 		}
 		result := map[string]any{"cluster": conf.Name, "revision": revision, "configured": true, "githubReady": false, "vmReady": false, "networkChanged": false, "serviceInstalled": false, "controllerCommand": "runnerloom controller run --state " + a.State + " --advertise " + advertise}
-		if role == "controller-node" {
-			if nodeName == "" {
-				if len(conf.Nodes) == 0 {
-					return errors.New("実行Nodeの定義が必要です")
-				}
-				nodeName = conf.Nodes[0].Name
-			}
-			n, ok := conf.Node(nodeName)
-			if !ok {
-				return errors.New("指定Nodeが設定にありません")
-			}
-			if nodeDir == "" {
-				nodeDir = a.State + "-node"
-			}
-			if diskDir == "" {
-				diskDir = "/var/lib/libvirt/images/runnerloom-" + conf.Name + "-" + nodeName
-			}
-			nc := agent.Config{Node: nodeName, Cluster: conf.Name, Controller: advertise, StateDir: nodeDir, DiskDir: diskDir, NetworkCIDR: cidr, Ceiling: n.LocalCeiling, CacheGiB: 100, QEMUUser: "libvirt-qemu"}
-			if e = nc.Validate(); e != nil {
+		if local != nil {
+			if e = localIdentity(c.Context(), s, ca, *local); e != nil {
 				return e
 			}
-			if e = localIdentity(c.Context(), s, ca, nc); e != nil {
-				return e
-			}
-			result["nodeConfig"] = filepath.Join(nodeDir, "agent.json")
+			result["nodeConfig"] = filepath.Join(local.StateDir, "agent.json")
 			result["next"] = "image import → network plan/apply → controller run → agent run。doctorとgithub checkで未確認項目を確認してください"
 		}
 		return a.output(result)
@@ -286,7 +296,7 @@ func localIdentity(ctx context.Context, s *core.Store, ca core.CA, c agent.Confi
 		if e = s.Authorize(ctx, c.Node); e != nil {
 			return e
 		}
-	} else {
+	} else if errors.Is(e, sql.ErrNoRows) {
 		inv, e := s.Invite(ctx, ca, c.Controller, 10*time.Minute)
 		if e != nil {
 			return e
@@ -301,6 +311,8 @@ func localIdentity(ctx context.Context, s *core.Store, ca core.CA, c agent.Confi
 			return e
 		}
 		certificate = approved.Certificate
+	} else {
+		return e
 	}
 	pair, e := tls.X509KeyPair(certificate, key)
 	if e != nil {

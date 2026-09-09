@@ -1,0 +1,307 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/MOVEI144/RunnerLoom/cluster.schema.json",
+  "title": "RunnerLoom Cluster v1alpha1",
+  "description": "Field validation. Use runnerloom config validate for references, totals, uniqueness by name and hard reservations.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "apiVersion": {
+      "const": "runnerloom/v1alpha1"
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,62}$"
+    },
+    "github": {
+      "$ref": "#/$defs/github"
+    },
+    "images": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/image"
+      },
+      "maxItems": 1024
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/node"
+      },
+      "maxItems": 1024
+    },
+    "pools": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/pool"
+      },
+      "maxItems": 1024
+    },
+    "reservations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/reservation"
+      },
+      "maxItems": 4096
+    }
+  },
+  "required": [
+    "apiVersion",
+    "name",
+    "github",
+    "images",
+    "nodes",
+    "pools"
+  ],
+  "$defs": {
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vcpu": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "memoryMiB": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 1073741824
+        },
+        "diskGiB": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        }
+      },
+      "required": [
+        "vcpu",
+        "memoryMiB",
+        "diskGiB"
+      ]
+    },
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/[^/?# ]+(/[^/?# ]+)?/?$"
+        },
+        "runnerGroupID": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
+        "credentialFile": {
+          "type": "string",
+          "pattern": "^/"
+        },
+        "allowedRepositories": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[^/ ]+/[^/ ]+$"
+          },
+          "maxItems": 1024,
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "url",
+        "runnerGroupID",
+        "credentialFile",
+        "allowedRepositories"
+      ]
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+        "minimumRootGiB": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        }
+      },
+      "required": [
+        "name",
+        "digest",
+        "minimumRootGiB"
+      ]
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "budget": {
+          "$ref": "#/$defs/resources"
+        },
+        "localCeiling": {
+          "$ref": "#/$defs/resources"
+        },
+        "labels": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          }
+        },
+        "allowedPools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "maxItems": 1024,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "name",
+        "budget",
+        "localCeiling",
+        "allowedPools"
+      ]
+    },
+    "pool": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "runnerName": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "image": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "vcpu": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65536
+        },
+        "memoryMiB": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 1073741824
+        },
+        "overheadMiB": {
+          "type": "integer",
+          "minimum": 512,
+          "maximum": 1048576
+        },
+        "rootGiB": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1048576
+        },
+        "scratchGiB": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1048576
+        },
+        "diskOverheadGiB": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "maxRunners": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "warmIdle": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "executionMinutes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 7200
+        },
+        "nodeSelector": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          },
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]{0,62}$"
+          }
+        },
+        "nodeName": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "runnerName",
+        "image",
+        "vcpu",
+        "memoryMiB",
+        "overheadMiB",
+        "rootGiB",
+        "diskOverheadGiB",
+        "maxRunners",
+        "executionMinutes"
+      ]
+    },
+    "reservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "node": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "pool": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]{0,62}$"
+        },
+        "slots": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        }
+      },
+      "required": [
+        "name",
+        "node",
+        "pool",
+        "slots"
+      ]
+    }
+  }
+}

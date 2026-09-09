@@ -54,7 +54,7 @@ func (c Config) Validate() error {
 			return errors.New("node paths must be normalized absolute paths")
 		}
 	}
-	if c.StateDir == c.DiskDir || strings.HasPrefix(c.DiskDir, c.StateDir+"/") {
+	if c.StateDir == c.DiskDir || strings.HasPrefix(c.DiskDir, c.StateDir+"/") || strings.HasPrefix(c.StateDir, c.DiskDir+"/") {
 		return errors.New("VM disk directory must be outside the private agent state directory")
 	}
 	return nil
