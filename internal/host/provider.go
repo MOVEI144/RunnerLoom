@@ -843,6 +843,9 @@ func (l *Libvirt) EnsureStopIntent(ctx context.Context, a core.Instance) error {
 
 // Init prepares only the explicitly approved, owned VM storage directory.
 func (l *Libvirt) Init(ctx context.Context) error {
+	if e := l.checkPhysicalCapacity(); e != nil {
+		return e
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if e := core.PrivateDir(l.StateDir); e != nil {

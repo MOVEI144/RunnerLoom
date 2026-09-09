@@ -343,3 +343,22 @@ func TestRuleHashIgnoresKernelHandles(t *testing.T) {
 		t.Fatal("kernel handle changed semantic rule hash")
 	}
 }
+
+func TestActualHostCeilingValidation(t *testing.T) {
+	m, e := parseMemory("MemTotal: 33554432 kB\nMemAvailable: 16777216 kB\n")
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = validateCeiling(core.Resources{CPU: 14, Memory: 24576, Disk: 100}, 16, m); e != nil {
+		t.Fatal(e)
+	}
+	if e = validateCeiling(core.Resources{CPU: 17, Memory: 24576, Disk: 100}, 16, m); e == nil {
+		t.Fatal("physical CPU capacity was exceeded")
+	}
+	if e = validateCeiling(core.Resources{CPU: 16, Memory: 32768, Disk: 100}, 16, m); e == nil {
+		t.Fatal("host memory reserve was exhausted")
+	}
+	if _, e = parseMemory("MemTotal: -1 kB\n"); e == nil {
+		t.Fatal("invalid host inventory accepted")
+	}
+}

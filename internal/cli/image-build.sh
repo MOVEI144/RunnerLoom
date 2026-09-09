@@ -10,7 +10,14 @@ for tool in curl gpgv python3 qemu-img qemu-system-x86_64 cloud-localds timeout 
 KEYRING=/usr/share/keyrings/ubuntu-cloudimage-keyring.gpg
 [[ -r "$KEYRING" ]] || { echo 'Install ubuntu-keyring to verify Canonical cloud images' >&2; exit 2; }
 WORK=$(mktemp -d "$(dirname "$OUT")/.runnerloom-build-XXXXXXXX")
-trap 'rm -rf -- "$WORK"' EXIT
+TAIL_PID=
+cleanup() {
+  status=$?
+  if [[ -n "$TAIL_PID" ]]; then kill "$TAIL_PID" 2>/dev/null || true; wait "$TAIL_PID" 2>/dev/null || true; fi
+  rm -rf -- "$WORK"
+  exit "$status"
+}
+trap cleanup EXIT
 BASE=https://cloud-images.ubuntu.com/noble/current
 FETCH=(curl --fail --silent --show-error --location --retry 3 --connect-timeout 20 --max-time 900 --proto '=https' --tlsv1.2)
 echo 'Verifying Canonical cloud image signature...' >&2
@@ -82,6 +89,9 @@ config={'ssh_pwauth':False,'disable_root':True,'bootcmd':[['systemctl','mask','-
 PYSEED
 cloud-localds "$WORK/build-seed.iso" "$WORK/build-user-data" "$WORK/build-meta-data"
 echo 'Booting a disposable image builder (no SSH, no incoming ports)...' >&2
+: > "$WORK/build.log"
+tail -n +1 -f "$WORK/build.log" >&2 &
+TAIL_PID=$!
 CPU_MODEL=max
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then CPU_MODEL=host; fi
 set +e
@@ -94,6 +104,9 @@ timeout --signal=TERM --kill-after=30s 30m qemu-system-x86_64 \
   -device virtio-rng-pci
 BUILD_STATUS=$?
 set -e
+kill "$TAIL_PID" 2>/dev/null || true
+wait "$TAIL_PID" 2>/dev/null || true
+TAIL_PID=
 if [[ "$BUILD_STATUS" != 0 ]] || ! grep -q '^RUNNERLOOM_GOLDEN_BUILD_COMPLETE' "$WORK/build.log"; then
   tail -n 160 "$WORK/build.log" >&2 || true
   echo 'Image-builder VM did not complete successfully; nothing is published' >&2

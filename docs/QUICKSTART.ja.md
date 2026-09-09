@@ -244,3 +244,23 @@ sudo runnerloom config apply --plan PLAN_ID --state /var/lib/runnerloom/controll
 Pool/GitHub接続の設定を変更したらControllerを再起動します。実行中VMは、それだけで停止しません。サイズやImageを変えるときは、新しいPool名を作ると環境を明確に分けられます。
 
 残したいモデル・ビルド成果物はJob終了前にArtifactや外部ストレージへ保存してください。VMディスクは永続保存場所ではありません。長時間学習では定期的に途中保存し、GitHub側の実行・トークン期限も確認します。
+
+
+## LAN自動発見とDHCPで変わるアドレス
+
+自動発見は任意です。使うPCに `avahi-daemon` と `avahi-utils` を入れ、ControllerをLANへ到達できる `.local` 名で起動します。ホストのDHCP設定を固定IPへ書き換える必要はありません。
+
+```bash
+sudo apt-get install -y avahi-daemon avahi-utils
+sudo runnerloom service install --role controller \
+  --state /var/lib/runnerloom/controller \
+  --listen 192.168.1.10:8443 --advertise https://controller.local:8443 \
+  --discoverable --start
+runnerloom discover --json
+```
+
+例のIPとホスト名は自分のLANへ置き換えてください。DHCPでControllerのIPが変わる場合は、LAN専用の待受を維持する方法（例: OS側のインターフェース方針とファイアウォールを確認した上で `0.0.0.0:8443`）を選びます。IP固定の `--listen` は変更後にはそのまま使えません。
+
+表示される候補は **未認証** です。発見画面の指紋を信用するのではなく、Controllerから受け取った招待の指紋で接続先を確認します。同じ `.local` 名の解決先IPが変わっても、TLSでは元の名前とCAを引き続き検証します。別VLAN・別拠点は自動発見対象ではありませんが、到達できるHTTPS URLの明示指定は利用できます。
+
+Node起動時はCPU数とRAMを実測し、承認上限が物理量を超えていないか再確認します。ハードウェアを減らした後や、別PCへ設定をコピーした場合は、設定を見直すまで実行を止めます。Nodeの秘密鍵そのものを別PCへコピーして使い回すことは禁止です。

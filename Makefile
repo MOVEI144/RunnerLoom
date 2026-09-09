@@ -1,0 +1,9 @@
+.PHONY: build test check
+build:
+	CGO_ENABLED=0 go build -trimpath -o dist/runnerloom ./cmd/runnerloom
+test:
+	go test -race -count=1 ./...
+check:
+	test -z "$$(gofmt -l .)"
+	go vet ./...
+	go test -race -count=1 ./...

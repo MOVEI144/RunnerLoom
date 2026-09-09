@@ -1,0 +1,13 @@
+/dist/
+/runnerloom
+/coverage.out
+*.qcow2
+*.iso
+*.pem
+*.key
+*.db
+*.db-shm
+*.db-wal
+.env
+/node-state/
+/controller-state/

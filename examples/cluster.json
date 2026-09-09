@@ -1,0 +1,78 @@
+{
+  "apiVersion": "runnerloom/v1alpha1",
+  "name": "home",
+  "github": {
+    "url": "https://github.com/MOVEI144",
+    "runnerGroupID": 1,
+    "credentialFile": "/var/lib/runnerloom/controller/github-credentials.json",
+    "allowedRepositories": [
+      "MOVEI144/RunnerLoom"
+    ]
+  },
+  "images": [
+    {
+      "name": "ubuntu-24",
+      "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+      "minimumRootGiB": 20
+    }
+  ],
+  "nodes": [
+    {
+      "name": "node-a",
+      "budget": {
+        "vcpu": 14,
+        "memoryMiB": 24576,
+        "diskGiB": 300
+      },
+      "localCeiling": {
+        "vcpu": 14,
+        "memoryMiB": 24576,
+        "diskGiB": 300
+      },
+      "allowedPools": [
+        "linux-lite",
+        "linux-heavy"
+      ]
+    }
+  ],
+  "pools": [
+    {
+      "name": "linux-lite",
+      "runnerName": "home-linux-lite",
+      "image": "ubuntu-24",
+      "vcpu": 4,
+      "memoryMiB": 4096,
+      "overheadMiB": 512,
+      "rootGiB": 20,
+      "scratchGiB": 0,
+      "diskOverheadGiB": 2,
+      "maxRunners": 3,
+      "warmIdle": 0,
+      "executionMinutes": 120,
+      "enabled": true
+    },
+    {
+      "name": "linux-heavy",
+      "runnerName": "home-linux-heavy",
+      "image": "ubuntu-24",
+      "vcpu": 8,
+      "memoryMiB": 8192,
+      "overheadMiB": 512,
+      "rootGiB": 40,
+      "scratchGiB": 0,
+      "diskOverheadGiB": 2,
+      "maxRunners": 1,
+      "warmIdle": 0,
+      "executionMinutes": 360,
+      "enabled": true
+    }
+  ],
+  "reservations": [
+    {
+      "name": "heavy-reserved",
+      "node": "node-a",
+      "pool": "linux-heavy",
+      "slots": 1
+    }
+  ]
+}

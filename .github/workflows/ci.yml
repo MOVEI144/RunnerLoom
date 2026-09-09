@@ -69,6 +69,11 @@ jobs:
         with:
           go-version: '1.27.1'
           cache: true
+      - name: Reclaim disposable CI-host disk space
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          sudo rm -rf /usr/local/lib/android /opt/ghc
+          df -h /
       - name: Install isolated CI-host virtualization tools
         run: |
           sudo apt-get update -qq
@@ -102,6 +107,11 @@ jobs:
         with:
           go-version: '1.27.1'
           cache: true
+      - name: Reclaim disposable CI-host disk space
+        run: |
+          test "$GITHUB_ACTIONS" = true
+          sudo rm -rf /usr/local/lib/android /opt/ghc
+          df -h /
       - name: Install image builder and virtualization tools
         run: |
           sudo apt-get update -qq
@@ -112,7 +122,8 @@ jobs:
       - name: Build an unregistered Golden Image with a verified official Runner
         run: |
           sudo install -d -m 0700 /var/lib/runnerloom-ci-build
-          sudo ./dist/runnerloom image build --out /var/lib/runnerloom-ci-build/runner.qcow2 --json
+          set -o pipefail
+          sudo ./dist/runnerloom image build --out /var/lib/runnerloom-ci-build/runner.qcow2 --json 2>&1 | tee "$RUNNER_TEMP/runnerloom-image-build.log"
           sudo cp /var/lib/runnerloom-ci-build/runner.qcow2.manifest.json "$RUNNER_TEMP/runner-image.manifest.json"
           sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/runner-image.manifest.json"
       - name: Boot the produced image, verify Runner binary and destroy VM
@@ -129,6 +140,7 @@ jobs:
           name: golden-image-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/runner-image.manifest.json
+            ${{ runner.temp }}/runnerloom-image-build.log
             ${{ runner.temp }}/runnerloom-evidence/
           retention-days: 14
           if-no-files-found: warn
