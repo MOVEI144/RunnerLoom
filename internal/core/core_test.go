@@ -486,3 +486,20 @@ func FuzzDecode(f *testing.F) {
 		}
 	})
 }
+
+func TestMissingMasterKeyNeverReinitializesExistingDatabase(t *testing.T) {
+	s, _ := testStore(t)
+	dir := s.Dir
+	if e := os.Remove(filepath.Join(dir, "master.key")); e != nil {
+		t.Fatal(e)
+	}
+	if other, e := OpenStore(dir); e == nil {
+		other.Close()
+		t.Fatal("lost master key was regenerated")
+	} else if code(e) != "MASTER_KEY_MISSING" {
+		t.Fatal(e)
+	}
+	if _, e := os.Stat(filepath.Join(dir, "master.key")); !os.IsNotExist(e) {
+		t.Fatal("master key was recreated")
+	}
+}

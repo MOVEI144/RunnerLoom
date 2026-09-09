@@ -143,6 +143,11 @@ func (i *Images) Import(ctx context.Context, r io.Reader, digest string) (string
 	if e = core.PrivateDir(i.Dir); e != nil {
 		return "", e
 	}
+	lock, e := core.AcquireLock(i.Dir, "image-cache")
+	if e != nil {
+		return "", e
+	}
+	defer lock.Close()
 	path := filepath.Join(i.Dir, name)
 	if _, e = os.Lstat(path); e == nil {
 		actual, _, e := hashFile(path)

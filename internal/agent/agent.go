@@ -13,8 +13,10 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"github.com/MOVEI144/RunnerLoom/internal/discovery"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -113,7 +115,21 @@ func NewClient(origin, state string) (*Client, error) {
 	return client(origin, cfg), nil
 }
 func client(origin string, cfg *tls.Config) *Client {
-	return &Client{URL: origin, HTTP: &http.Client{Transport: &http.Transport{TLSClientConfig: cfg, MaxIdleConns: 4, IdleConnTimeout: 30 * time.Second, ResponseHeaderTimeout: 20 * time.Second}, Timeout: 45 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("controller redirects are forbidden") }}}
+	return &Client{URL: origin, HTTP: &http.Client{Transport: &http.Transport{TLSClientConfig: cfg, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, e := net.SplitHostPort(address)
+		if e != nil {
+			return nil, e
+		}
+		if strings.HasSuffix(strings.ToLower(host), ".local") {
+			ip, e := discovery.ResolveLocal(ctx, host)
+			if e != nil {
+				return nil, e
+			}
+			address = net.JoinHostPort(ip, port)
+		}
+		dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+		return dialer.DialContext(ctx, network, address)
+	}, MaxIdleConns: 4, IdleConnTimeout: 30 * time.Second, ResponseHeaderTimeout: 20 * time.Second}, Timeout: 45 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("controller redirects are forbidden") }}}
 }
 func (c *Client) Post(ctx context.Context, path string, q, v any) error {
 	b, e := json.Marshal(q)

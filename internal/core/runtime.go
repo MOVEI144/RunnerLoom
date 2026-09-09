@@ -53,8 +53,10 @@ func (l *Lock) Close() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
-	return l.file.Close()
+	f := l.file
+	l.file = nil
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	return f.Close()
 }
 
 func SuggestedResources(dedicated bool) Resources {

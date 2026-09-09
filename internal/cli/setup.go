@@ -253,6 +253,9 @@ func localIdentity(ctx context.Context, s *core.Store, ca core.CA, c agent.Confi
 	key, e := core.ReadSecret(keyPath)
 	var csr []byte
 	if os.IsNotExist(e) {
+		if _, certErr := os.Lstat(filepath.Join(c.StateDir, "node.pem")); !os.IsNotExist(certErr) {
+			return errors.New("登録済みNodeの鍵がありません。新しい鍵を勝手に作らず復旧してください")
+		}
 		key, csr, e = core.NewKeyCSR()
 		if e != nil {
 			return e

@@ -18,6 +18,7 @@ import (
 	"github.com/MOVEI144/RunnerLoom/internal/agent"
 	"github.com/MOVEI144/RunnerLoom/internal/control"
 	"github.com/MOVEI144/RunnerLoom/internal/core"
+	"github.com/MOVEI144/RunnerLoom/internal/discovery"
 	gh "github.com/MOVEI144/RunnerLoom/internal/github"
 	"github.com/MOVEI144/RunnerLoom/internal/host"
 	"github.com/spf13/cobra"
@@ -337,7 +338,7 @@ func (a *App) Command() *cobra.Command {
 	controller := &cobra.Command{Use: "controller", Short: "管理サービスを起動"}
 	root.AddCommand(controller)
 	var listen, advertise string
-	var offline bool
+	var offline, discoverable bool
 	runController := add(controller, "run", "HTTPS管理サービスとGitHub listenerを常駐起動", 0, func(c *cobra.Command, _ []string) error {
 		lock, e := core.AcquireLock(a.State, "controller")
 		if e != nil {
@@ -359,6 +360,13 @@ func (a *App) Command() *cobra.Command {
 		ca, e := core.LoadCA(a.State)
 		if e != nil {
 			return e
+		}
+		if discoverable {
+			stop, e := discovery.Publish(c.Context(), conf.Name, advertise, core.Hash(ca.Certificate.Raw))
+			if e != nil {
+				return e
+			}
+			defer stop()
 		}
 		server := control.New(s, ca, conf.Name)
 		ctx, cancel := context.WithCancel(c.Context())
@@ -392,6 +400,7 @@ func (a *App) Command() *cobra.Command {
 	})
 	runController.Flags().StringVar(&listen, "listen", "127.0.0.1:8443", "明示的なLAN待受アドレス")
 	runController.Flags().StringVar(&advertise, "advertise", "https://127.0.0.1:8443", "Nodeに案内するURL")
+	runController.Flags().BoolVar(&discoverable, "discoverable", false, "AvahiでLAN上へ公開。発見は参加承認の代わりにはなりません")
 	runController.Flags().BoolVar(&offline, "offline", false, "GitHubへ接続せず参加受付だけを行う。テスト・初期設定用")
 	agentCmd := &cobra.Command{Use: "agent", Short: "実行Nodeの常駐サービス"}
 	root.AddCommand(agentCmd)

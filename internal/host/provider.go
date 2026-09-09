@@ -128,7 +128,19 @@ func (l *Libvirt) diskRoot() error {
 	if e := safeDirectory(l.DiskDir, 0711); e != nil {
 		return e
 	}
+	st, err := os.Stat(l.DiskDir)
+	if err != nil {
+		return err
+	}
+	if st.Mode().Perm()&0022 != 0 {
+		return errors.New("VM storage must not be writable by other users")
+	}
 	marker := filepath.Join(l.DiskDir, ".runnerloom-owner")
+	if st, err := os.Lstat(marker); err == nil && !st.Mode().IsRegular() {
+		return errors.New("invalid VM storage ownership marker")
+	} else if err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	if b, e := os.ReadFile(marker); e == nil {
 		if string(b) != l.Cluster+"/"+l.Node {
 			return errors.New("VM storage belongs to another node")
@@ -532,6 +544,13 @@ func (l *Libvirt) ensure(ctx context.Context, a core.Instance, jit string, diagn
 	}
 	if !used.Add(a.Pool.Charge()).Fits(l.Ceiling) {
 		return errors.New("local resource commitments exhausted")
+	}
+	free, e := FreeGiB(l.DiskDir)
+	if e != nil {
+		return e
+	}
+	if free < a.Pool.Charge().Disk+2 {
+		return errors.New("physical VM storage lacks the requested capacity and safety margin")
 	}
 	m = manifest{Instance: a, Phase: "prepared", JITHash: core.Hash([]byte(jit)), Diagnostic: diagnostic}
 	if e = l.save(m); e != nil {

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -85,6 +86,16 @@ func WritePrivate(path string, b []byte) error {
 		return e
 	}
 	defer os.Remove(f.Name())
+	if os.Geteuid() == 0 {
+		if parent, e := os.Stat(dir); e == nil {
+			if stat, ok := parent.Sys().(*syscall.Stat_t); ok {
+				if e = f.Chown(int(stat.Uid), int(stat.Gid)); e != nil {
+					f.Close()
+					return e
+				}
+			}
+		}
+	}
 	if _, e = f.Write(b); e == nil {
 		e = f.Sync()
 	}
@@ -112,6 +123,11 @@ func OpenStore(dir string) (*Store, error) {
 	keyPath := filepath.Join(dir, "master.key")
 	key, e := ReadSecret(keyPath)
 	if os.IsNotExist(e) {
+		if st, dbErr := os.Stat(filepath.Join(dir, "controller.db")); dbErr == nil && st.Size() > 0 {
+			return nil, Fail("MASTER_KEY_MISSING", "既存DBの復号鍵がありません。バックアップから復旧してください", nil)
+		} else if dbErr != nil && !os.IsNotExist(dbErr) {
+			return nil, dbErr
+		}
 		key = make([]byte, 32)
 		if _, e = rand.Read(key); e != nil {
 			return nil, e
@@ -130,6 +146,9 @@ func OpenStore(dir string) (*Store, error) {
 		}
 	} else if e != nil {
 		return nil, e
+	}
+	if len(key) != 32 {
+		return nil, errors.New("master key must be exactly 32 bytes")
 	}
 	block, e := aes.NewCipher(key)
 	if e != nil {
@@ -888,7 +907,14 @@ func (s *Store) Backup(ctx context.Context, destination string) error {
 	if _, e := os.Lstat(destination); !os.IsNotExist(e) {
 		return errors.New("backup destination must not exist")
 	}
-	_, e := s.DB.ExecContext(ctx, "VACUUM INTO ?", destination)
+	f, e := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if e != nil {
+		return e
+	}
+	if e = f.Close(); e != nil {
+		return e
+	}
+	_, e = s.DB.ExecContext(ctx, "VACUUM INTO ?", destination)
 	if e != nil {
 		return e
 	}

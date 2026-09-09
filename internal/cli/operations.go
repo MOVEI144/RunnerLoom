@@ -17,6 +17,7 @@ import (
 
 	"github.com/MOVEI144/RunnerLoom/internal/agent"
 	"github.com/MOVEI144/RunnerLoom/internal/core"
+	"github.com/MOVEI144/RunnerLoom/internal/discovery"
 	"github.com/MOVEI144/RunnerLoom/internal/host"
 	"github.com/spf13/cobra"
 )
@@ -25,13 +26,23 @@ import (
 var imageBuildScript string
 
 func (a *App) addOperations(root *cobra.Command) {
+	var discoveryTimeout time.Duration
+	discover := add(root, "discover", "LAN上のController候補を表示。参加には招待・鍵の確認が必要", 0, func(c *cobra.Command, _ []string) error {
+		v, e := discovery.Discover(c.Context(), discoveryTimeout)
+		if e != nil {
+			return e
+		}
+		return a.output(map[string]any{"controllers": v, "trusted": false, "next": "招待ファイルのCA指紋を確認してnode joinを実行"})
+	})
+	discover.Flags().DurationVar(&discoveryTimeout, "timeout", 5*time.Second, "自動発見の上限時間")
+
 	images, _, e := root.Find([]string{"image"})
 	if e != nil {
 		panic(e)
 	}
 	var out, runnerVersion string
 	build := add(images, "build", "署名済みUbuntuと公式Runnerから、未登録Golden Imageを作成", 0, func(c *cobra.Command, _ []string) error {
-		if !filepath.IsAbs(out) || !strings.HasSuffix(out, ".qcow2") || strings.ContainsAny(out, "\x00\r\n:") {
+		if !filepath.IsAbs(out) || !strings.HasSuffix(out, ".qcow2") || strings.ContainsAny(out, "\x00\r\n:,") {
 			return errors.New("outは改行・コロンを含まない絶対パスの.qcow2にしてください")
 		}
 		if runnerVersion != "latest" && !regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(runnerVersion) {
