@@ -333,6 +333,9 @@ func (s *Store) Apply(ctx context.Context, id string) (revision int64, err error
 	return
 }
 func checkCapacityUpdate(c Config, runs []Instance) error {
+	if e := validateReservationOwners(c, runs); e != nil {
+		return e
+	}
 	for _, p := range c.Pools {
 		count := int64(0)
 		for _, a := range runs {
@@ -362,17 +365,11 @@ func checkCapacityUpdate(c Config, runs []Instance) error {
 			if r.Node != n.Name {
 				continue
 			}
-			p, _ := c.Pool(r.Pool)
-			used := int64(0)
-			for _, a := range runs {
-				if a.Reservation == r.Name && !a.Held.Empty() {
-					used++
-				}
+			protected, _, e := reservationProtection(c, r, runs)
+			if e != nil {
+				return e
 			}
-			if used > r.Slots {
-				return Fail("RESERVATION_BUSY", "使用中の予約を減らせません", r.Name)
-			}
-			held = held.Add(p.Charge().Mul(r.Slots - used))
+			held = held.Add(protected)
 		}
 		if !held.Fits(n.Budget) {
 			return Fail("BUDGET_BUSY", "割り当て済み・予約済みの資源を下回っています", n.Name)
@@ -463,6 +460,7 @@ type Candidate struct {
 }
 
 func candidates(c Config, p Pool, runs []Instance, obs map[string]Observation, now time.Time) []Candidate {
+	reservationErr := validateReservationOwners(c, runs)
 	rows := []Candidate{}
 	count := int64(0)
 	for _, a := range runs {
@@ -473,6 +471,9 @@ func candidates(c Config, p Pool, runs []Instance, obs map[string]Observation, n
 	im, _ := c.Image(p.Image)
 	for _, n := range c.Nodes {
 		v := Candidate{Node: n.Name, Available: n.Budget, Reasons: []string{}}
+		if reservationErr != nil {
+			v.Reasons = append(v.Reasons, "RESERVATION_INCONSISTENT")
+		}
 		held := Resources{}
 		unused := Resources{}
 		if !p.Enabled {
@@ -506,15 +507,12 @@ func candidates(c Config, p Pool, runs []Instance, obs map[string]Observation, n
 			if r.Node != n.Name {
 				continue
 			}
-			rp, _ := c.Pool(r.Pool)
-			used := int64(0)
-			for _, a := range runs {
-				if a.Reservation == r.Name && !a.Held.Empty() {
-					used++
-				}
+			protected, slots, e := reservationProtection(c, r, runs)
+			if e != nil {
+				v.Reasons = append(v.Reasons, "RESERVATION_INCONSISTENT")
+				continue
 			}
-			slots := max(int64(0), r.Slots-used)
-			unused = unused.Add(rp.Charge().Mul(slots))
+			unused = unused.Add(protected)
 			if slots > 0 && r.Pool == p.Name && v.Reservation == "" {
 				v.Reservation = r.Name
 			}

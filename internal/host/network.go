@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -221,6 +222,9 @@ func (n Network) Check(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
+	if e = verifyNetworkPolicy(b, []byte(p.XML)); e != nil {
+		return e
+	}
 	if uuid != seal.UUID {
 		return errors.New("network identity changed")
 	}
@@ -289,7 +293,7 @@ func (n Network) Apply(ctx context.Context) error {
 		if r.Dst == "default" || r.Dev == p.Bridge {
 			continue
 		}
-		actual, e := netip.ParsePrefix(r.Dst)
+		actual, e := routePrefix(r.Dst)
 		if e == nil && wanted.Overlaps(actual) {
 			return fmt.Errorf("VM subnet conflicts with existing route %s", r.Dst)
 		}
@@ -298,6 +302,9 @@ func (n Network) Apply(ctx context.Context) error {
 	b, e = n.Exec.Run(ctx, "virsh", []string{"--connect", "qemu:///system", "net-dumpxml", p.Name}, nil)
 	if e == nil {
 		if _, e = verifyNetwork(b, n.Cluster, p.Name, p.Bridge); e != nil {
+			return e
+		}
+		if e = verifyNetworkPolicy(b, []byte(p.XML)); e != nil {
 			return e
 		}
 		exists = true
@@ -351,6 +358,9 @@ func (n Network) Apply(ctx context.Context) error {
 	if e != nil {
 		return e
 	}
+	if e = verifyNetworkPolicy(b, []byte(p.XML)); e != nil {
+		return e
+	}
 	b, e = n.Exec.Run(ctx, "nft", []string{"-j", "list", "table", "inet", p.Table}, nil)
 	if e != nil {
 		return e
@@ -364,4 +374,80 @@ func (n Network) Apply(ctx context.Context) error {
 		return e
 	}
 	return n.Check(ctx)
+}
+
+// A libvirt UUID proves ownership, not isolation. Check the security-relevant
+// configuration too; generated UUID/MAC and harmless NAT port defaults are not
+// policy. Slice fields also make duplicate elements visible instead of letting
+// encoding/xml silently accept only their last value.
+type networkPolicy struct {
+	IPv6    string `xml:"ipv6,attr"`
+	Forward []struct {
+		Mode       string     `xml:"mode,attr"`
+		Dev        string     `xml:"dev,attr"`
+		Interfaces []struct{} `xml:"interface"`
+	} `xml:"forward"`
+	Bridge []struct {
+		Name  string `xml:"name,attr"`
+		STP   string `xml:"stp,attr"`
+		Delay string `xml:"delay,attr"`
+	} `xml:"bridge"`
+	Port []struct {
+		Isolated string `xml:"isolated,attr"`
+	} `xml:"port"`
+	IP []struct {
+		Family  string `xml:"family,attr"`
+		Address string `xml:"address,attr"`
+		Netmask string `xml:"netmask,attr"`
+		Prefix  string `xml:"prefix,attr"`
+		DHCP    []struct {
+			Ranges []struct {
+				Start string `xml:"start,attr"`
+				End   string `xml:"end,attr"`
+			} `xml:"range"`
+			Hosts []struct{} `xml:"host"`
+			BootP []struct{} `xml:"bootp"`
+		} `xml:"dhcp"`
+		TFTP []struct{} `xml:"tftp"`
+	} `xml:"ip"`
+	Routes      []struct{} `xml:"route"`
+	VirtualPort []struct{} `xml:"virtualport"`
+}
+
+func verifyNetworkPolicy(actual, expected []byte) error {
+	var got, want networkPolicy
+	if e := xml.Unmarshal(actual, &got); e != nil {
+		return e
+	}
+	if e := xml.Unmarshal(expected, &want); e != nil {
+		return e
+	}
+	// libvirt may omit the default IPv6=no and family=ipv4 attributes.
+	normalize := func(p *networkPolicy) {
+		if p.IPv6 == "" {
+			p.IPv6 = "no"
+		}
+		for i := range p.IP {
+			if p.IP[i].Family == "" {
+				p.IP[i].Family = "ipv4"
+			}
+		}
+	}
+	normalize(&got)
+	normalize(&want)
+	if !reflect.DeepEqual(got, want) {
+		return errors.New("libvirt network security policy drift; drain and inspect the network before reapplying")
+	}
+	return nil
+}
+func routePrefix(dst string) (netip.Prefix, error) {
+	p, e := netip.ParsePrefix(dst)
+	if e == nil {
+		return p.Masked(), nil
+	}
+	ip, e := netip.ParseAddr(dst)
+	if e != nil {
+		return netip.Prefix{}, e
+	}
+	return netip.PrefixFrom(ip, ip.BitLen()), nil
 }
