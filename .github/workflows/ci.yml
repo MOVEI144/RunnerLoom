@@ -1,0 +1,94 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    name: Go, contracts and CLI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Formatting, schemas and dependencies
+        run: |
+          test -z "$(gofmt -l cmd internal)"
+          python3 scripts/check-source.py
+          go mod verify
+          go vet ./...
+      - name: Race and integration tests
+        run: |
+          mkdir -p dist
+          go test -race -count=1 -json ./... | tee dist/test-events.jsonl
+          python3 scripts/test-summary.py dist/test-events.jsonl > dist/test-summary.json
+      - name: Coverage and bounded fuzzing
+        run: |
+          go test -count=1 -coverpkg=./internal/... -coverprofile=dist/coverage.out ./...
+          go tool cover -func=dist/coverage.out > dist/coverage.txt
+          go test ./internal/strictjson -run '^$' -fuzz FuzzDecode -fuzztime=5s -parallel=2
+      - name: Build and CLI smoke test
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w -X github.com/MOVEI144/RunnerLoom/internal/cli.Commit=$GITHUB_SHA" -o dist/runnerloom-linux-amd64 ./cmd/runnerloom
+          ./dist/runnerloom-linux-amd64 demo --json > dist/demo.json
+          ./dist/runnerloom-linux-amd64 doctor --json > dist/doctor.json
+          for f in examples/*.json; do ./dist/runnerloom-linux-amd64 config validate --file "$f" --json; done
+          python3 -c 'import json; r=json.load(open("dist/demo.json")); assert r["ok"]; assert r["data"]["realVmsCreated"] == 0; assert r["data"]["finalHeld"]["vcpu"] == 0'
+          go version -m dist/runnerloom-linux-amd64 > dist/build-dependencies.txt
+          (cd dist && sha256sum runnerloom-linux-amd64 > SHA256SUMS)
+      - name: Test report
+        if: always()
+        run: |
+          echo '## RunnerLoom verification' >> "$GITHUB_STEP_SUMMARY"
+          if test -f dist/test-summary.json; then printf '\n```json\n' >> "$GITHUB_STEP_SUMMARY"; cat dist/test-summary.json >> "$GITHUB_STEP_SUMMARY"; printf '\n```\n' >> "$GITHUB_STEP_SUMMARY"; fi
+          echo 'Unit/contract/loopback tests are not GitHub-runner or GPU end-to-end acceptance.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: runnerloom-linux-amd64-development
+          path: dist/
+          retention-days: 7
+  qemu:
+    name: Real qcow2 and blank KVM VM
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - name: Prepare disposable virtualization host
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends qemu-utils qemu-system-x86 libvirt-daemon-system libvirt-clients
+          sudo systemctl start libvirtd
+          sudo mkdir -p /var/lib/libvirt/images
+      - name: Compile isolated integration tests
+        run: |
+          mkdir -p dist
+          go test -c -o dist/provider.test ./internal/provider
+      - name: Exercise real provider boundary
+        run: |
+          kvm=0
+          if test -c /dev/kvm; then kvm=1; fi
+          sudo env RUNNERLOOM_QEMU_TEST=1 RUNNERLOOM_KVM_TEST="$kvm" ./dist/provider.test -test.v -test.run '^TestReal' | tee dist/qemu-kvm-tests.txt
+          echo "KVM available: $kvm" >> "$GITHUB_STEP_SUMMARY"
+          echo 'This is a blank VM lifecycle test, not a booted runner, firewall-isolation or GPU test.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: qemu-kvm-verification
+          path: dist/qemu-kvm-tests.txt
+          retention-days: 7
