@@ -125,12 +125,15 @@ func TestControllerAgentRealVMLifecycle(t *testing.T) {
 	require(t, e)
 	ca, e := core.InitCA(controllerDir, cluster)
 	require(t, e)
-	src, e := os.Open(image)
-	require(t, e)
+	// Reuse the immutable build artifact on this filesystem rather than storing
+	// a third byte-for-byte copy on a small CI disk. The Agent still downloads
+	// the entire image through real authenticated HTTPS and verifies its digest.
 	cache := &host.Images{Dir: filepath.Join(controllerDir, "images"), LimitGiB: 8, Exec: host.SystemExecutor{}}
-	_, e = cache.Import(ctx, src, digest)
-	src.Close()
+	require(t, core.PrivateDir(cache.Dir))
+	cachedPath, e := cache.Path(digest)
 	require(t, e)
+	require(t, os.Link(image, cachedPath))
+	require(t, cache.Verify(ctx, digest))
 	startServer := func() {
 		handler := control.New(s, ca, cluster)
 		cfg, err := handler.TLSConfig([]string{"127.0.0.1"})
@@ -191,7 +194,7 @@ func TestControllerAgentRealVMLifecycle(t *testing.T) {
 	positive.Close()
 	lib.DiagnosticProbe = fmt.Sprintf("172.30.242.1:%d", port)
 	a.Provider = &diagnosticWorkload{lib}
-	a.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	a.Log = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	ids := []string{}
 	defer func() {
 		cleanup, done := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -241,6 +244,9 @@ func TestControllerAgentRealVMLifecycle(t *testing.T) {
 		for i := 0; i < 2; i++ {
 			require(t, a.Step(ctx))
 		}
+		free, err := host.FreeGiB(disks)
+		require(t, err)
+		t.Logf("round=%d actual_free_disk_gib=%d requested_charge_gib=%d", round+1, free, p.Charge().Disk)
 		rows, err := s.Explain(ctx, p.Name)
 		require(t, err)
 		if len(rows) != 1 || len(rows[0].Reasons) != 0 {
@@ -338,7 +344,7 @@ func TestControllerAgentRealVMLifecycle(t *testing.T) {
 	if after := fileDigest(t, image); after != digest {
 		t.Fatal("source golden image changed")
 	}
-	report := map[string]any{"commit": os.Getenv("GITHUB_SHA"), "scope": "real controller/agent/libvirt; GitHub queue and job are explicit fixtures", "live_github_e2e": false, "home_cluster_e2e": false, "real_virtual_machines": true, "golden_image_unchanged": true, "mutual_tls_enrollment": true, "rounds": results, "emulator": lib.Emulator}
+	report := map[string]any{"commit": os.Getenv("GITHUB_SHA"), "scope": "real controller/agent/libvirt; GitHub queue and job are explicit fixtures", "live_github_e2e": false, "home_cluster_e2e": false, "real_virtual_machines": true, "golden_image_unchanged": true, "mutual_tls_enrollment": true, "rounds": results, "emulator": map[bool]string{true: "tcg", false: "kvm"}[lib.Emulator == "tcg"]}
 	data, err := json.MarshalIndent(report, "", "  ")
 	require(t, err)
 	require(t, os.WriteFile(filepath.Join(evidence, "runtime-result.json"), data, 0600))
