@@ -418,6 +418,11 @@ func Contains(ss []string, s string) bool {
 	return false
 }
 func ValidateInstance(a Instance) error {
+	p := a.Pool
+	if p.VCPU < 1 || p.VCPU > 65536 || p.MemoryMiB < 512 || p.MemoryMiB > 1073741824 || p.OverheadMiB < 512 || p.OverheadMiB > 1048576 || p.RootGiB < 1 || p.RootGiB > 1048576 || p.ScratchGiB < 0 || p.ScratchGiB > 1048576 || p.DiskOverheadGiB < 1 || p.DiskOverheadGiB > 1024 {
+		return errors.New("VM component size outside safe bounds")
+	}
+
 	if !ValidID(a.ID) || !ValidName(a.Node) || !ValidName(a.Pool.Name) || !digestPattern.MatchString(a.Image.Digest) || !a.Pool.Charge().Valid() || a.Deadline.IsZero() {
 		return fmt.Errorf("invalid instance identity or resources")
 	}

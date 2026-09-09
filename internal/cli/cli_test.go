@@ -125,7 +125,7 @@ func TestInvitationDoesNotPrintSecret(t *testing.T) {
 	if code != 0 {
 		t.Fatal(out, errout)
 	}
-	path := filepath.Join(t.TempDir(), "invite.json")
+	path := filepath.Join(t.TempDir(), "private", "invite.json")
 	code, out, errout = invoke("node", "invite", "--url", "https://controller.example:8443", "--out", path, "--state", dir, "--json")
 	if code != 0 {
 		t.Fatal(out, errout)

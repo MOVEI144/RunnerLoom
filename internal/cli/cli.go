@@ -526,6 +526,7 @@ func (a *App) Command() *cobra.Command {
 	adopt.Flags().IntVar(&setID, "id", 0, "確認済みのScale Set ID")
 	_ = adopt.MarkFlagRequired("pool")
 	_ = adopt.MarkFlagRequired("id")
+	a.addOperations(root)
 	a.addSetup(root)
 	a.addService(root)
 	a.addSmoke(root)

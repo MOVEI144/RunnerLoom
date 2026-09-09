@@ -114,8 +114,12 @@ func safeDirectory(path string, mode os.FileMode) error {
 			break
 		}
 	}
+	_, before := os.Lstat(path)
 	if e := os.MkdirAll(path, mode); e != nil {
 		return e
+	}
+	if os.IsNotExist(before) {
+		return os.Chmod(path, mode)
 	}
 	return nil
 }
@@ -283,8 +287,19 @@ trap 'rm -f /run/runnerloom-jit; sync; systemctl poweroff --no-block' EXIT
 chmod 0600 /run/runnerloom-jit
 chown runner:runner /run/runnerloom-jit
 cd /opt/actions-runner
-runuser -u runner -- /bin/bash -c 'exec ./run.sh --jitconfig "$(cat /run/runnerloom-jit)"'
+timeout --signal=TERM --kill-after=30s RUNNERLOOM_TIMEOUT_SECONDS runuser -u runner -- /bin/bash -c 'exec ./run.sh --jitconfig "$(cat /run/runnerloom-jit)"'
+echo RUNNERLOOM_RUNNER_EXITED
 `
+	run = strings.ReplaceAll(run, "RUNNERLOOM_TIMEOUT_SECONDS", strconv.FormatInt(max(int64(1), a.Deadline.Unix()-time.Now().Unix()), 10))
+	if a.Pool.ScratchGiB > 0 {
+		run = strings.Replace(run, "cd /opt/actions-runner", `if [ -b /dev/vdb ]; then
+  mkfs.ext4 -q /dev/vdb
+  mkdir -p /scratch
+  mount -o nodev,nosuid /dev/vdb /scratch
+  chown runner:runner /scratch
+fi
+cd /opt/actions-runner`, 1)
+	}
 	if diagnostic {
 		run = `#!/bin/bash
 set -eu
@@ -329,7 +344,29 @@ func (l *Libvirt) ensureConsole(id string, dir string) error {
 	if e != nil {
 		return e
 	}
-	if e = os.Chmod(path, 0666); e != nil {
+	account := l.QEMUUser
+	if account == "" {
+		account = "libvirt-qemu"
+	}
+	u, lookupErr := user.Lookup(account)
+	if lookupErr != nil {
+		ln.Close()
+		return lookupErr
+	}
+	uid, e := strconv.Atoi(u.Uid)
+	if e != nil || uid == 0 {
+		ln.Close()
+		return errors.New("non-root QEMU account required")
+	}
+	gid, e := strconv.Atoi(u.Gid)
+	if e != nil {
+		ln.Close()
+		return e
+	}
+	if e = os.Chown(path, uid, gid); e == nil {
+		e = os.Chmod(path, 0600)
+	}
+	if e != nil {
 		ln.Close()
 		return e
 	}
@@ -757,4 +794,17 @@ func (l *Libvirt) EnsureStopIntent(ctx context.Context, a core.Instance) error {
 		return errors.New("unrecorded disk directory requires reconciliation")
 	}
 	return l.save(manifest{Instance: a, Phase: "stopped"})
+}
+
+// Init prepares only the explicitly approved, owned VM storage directory.
+func (l *Libvirt) Init(ctx context.Context) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e := core.PrivateDir(l.StateDir); e != nil {
+		return e
+	}
+	if e := l.diskRoot(); e != nil {
+		return e
+	}
+	return nil
 }

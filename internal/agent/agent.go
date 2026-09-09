@@ -213,8 +213,9 @@ func Enroll(ctx context.Context, invite core.Invitation, c Config) (core.Enrollm
 		if e != nil {
 			return out, e
 		}
-		if _, e = core.NodeIdentity(leaf, c.Cluster); e != nil {
-			return out, e
+		identity, identityErr := core.NodeIdentity(leaf, c.Cluster)
+		if identityErr != nil || identity != c.Node {
+			return out, errors.New("returned node certificate identity mismatch")
 		}
 		roots := x509.NewCertPool()
 		roots.AppendCertsFromPEM(invite.CA)
@@ -452,6 +453,11 @@ func (a *Agent) Step(ctx context.Context) error {
 	return nil
 }
 func (a *Agent) Run(ctx context.Context) error {
+	if init, ok := a.Provider.(interface{ Init(context.Context) error }); ok {
+		if e := init.Init(ctx); e != nil {
+			return e
+		}
+	}
 	defer a.Client.HTTP.CloseIdleConnections()
 	if p, ok := a.Provider.(io.Closer); ok {
 		defer p.Close()

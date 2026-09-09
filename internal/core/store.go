@@ -333,6 +333,17 @@ func (s *Store) Apply(ctx context.Context, id string) (revision int64, err error
 	return
 }
 func checkCapacityUpdate(c Config, runs []Instance) error {
+	for _, p := range c.Pools {
+		count := int64(0)
+		for _, a := range runs {
+			if a.Pool.Name == p.Name && !a.Held.Empty() {
+				count++
+			}
+		}
+		if count > p.MaxRunners {
+			return Fail("POOL_LIMIT_BUSY", "使用中の台数よりPool上限を小さくできません", p.Name)
+		}
+	}
 	for _, n := range c.Nodes {
 		held := Resources{}
 		for _, a := range runs {
