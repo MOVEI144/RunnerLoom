@@ -1,0 +1,38 @@
+name: Development toolchain
+on:
+  push:
+    branches: [feat/runnerloom-core]
+    paths: [.github/workflows/development-toolchain.yml]
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Resolve and record dependency versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/runnerloom-dev/source /tmp/runnerloom-dev/modules
+          cd /tmp/runnerloom-dev/source
+          go mod init github.com/MOVEI144/RunnerLoom
+          go get modernc.org/sqlite@v1.58.0 github.com/actions/scaleset@main google.golang.org/grpc@latest
+          go mod download all
+          go list -m -json all > dependency-lock.json
+          cp -a "$(go env GOPATH)/pkg/mod/." /tmp/runnerloom-dev/modules/
+          cp -a "$(go env GOROOT)" /tmp/runnerloom-dev/go
+          rm -rf /tmp/runnerloom-dev/go/pkg/tool /tmp/runnerloom-dev/go/test /tmp/runnerloom-dev/go/doc
+          # Keep compiler/linker: go/pkg/tool is needed for offline builds.
+          cp -a "$(go env GOROOT)/pkg/tool" /tmp/runnerloom-dev/go/pkg/tool
+          tar -C /tmp -czf /tmp/runnerloom-dev.tar.gz runnerloom-dev
+      - uses: actions/upload-artifact@v4
+        with:
+          name: development-toolchain
+          path: /tmp/runnerloom-dev.tar.gz
+          retention-days: 1
+          compression-level: 0
