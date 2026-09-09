@@ -1,0 +1,69 @@
+name: Import tested development source
+on:
+  push:
+    branches: [feat/runnerloom-core]
+    paths: [.runnerloom-bootstrap/manifest.json]
+permissions:
+  contents: write
+concurrency:
+  group: runnerloom-source-import
+  cancel-in-progress: false
+jobs:
+  import:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.1'
+          cache: false
+      - name: Verify and unpack source only
+        shell: python
+        run: |
+          from pathlib import Path, PurePosixPath
+          import hashlib, io, json, lzma, tarfile
+          seed = Path('.runnerloom-bootstrap')
+          manifest = json.loads((seed / 'manifest.json').read_text())
+          assert manifest['sha256'] == 'ff3cea97b012669aef1e9772965dbb630087878683e1af80a42549c8cca4f3a2'
+          data = b''.join((seed / f'chunk-{n:02}.bin').read_bytes() for n in range(manifest['chunks']))
+          assert len(data) == manifest['size']
+          assert hashlib.sha256(data).hexdigest() == manifest['sha256']
+          decoder = lzma.LZMADecompressor()
+          decoded = decoder.decompress(data, max_length=16*1024*1024)
+          assert decoder.eof and not decoder.unused_data
+          top = {'README.md','AGENTS.md','SECURITY.md','CONTRIBUTING.md','Makefile','.gitignore','go.mod','go.sum'}
+          prefixes = {'cmd','internal','docs','examples','schemas','scripts','packaging'}
+          with tarfile.open(fileobj=io.BytesIO(decoded), mode='r:') as archive:
+              members = archive.getmembers()
+              assert len(members) <= 500
+              assert sum(m.size for m in members) < 10*1024*1024
+              for m in members:
+                  p = PurePosixPath(m.name)
+                  assert m.isfile() and not p.is_absolute() and '..' not in p.parts
+                  assert m.name in top or p.parts[0] in prefixes or m.name == '.github/dependabot.yml'
+                  dest = Path(m.name)
+                  assert not dest.is_symlink()
+                  dest.parent.mkdir(parents=True, exist_ok=True)
+                  dest.write_bytes(archive.extractfile(m).read())
+          expected = json.loads(Path('docs/source-manifest.json').read_text())
+          for name, digest in expected.items():
+              assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name
+          print(f'Verified {len(expected)} source files; no workflow or git metadata imported.')
+      - name: Verify imported implementation
+        run: |
+          test -z "$(gofmt -l cmd internal)"
+          go mod verify
+          go vet ./...
+          go test -race -count=1 ./...
+          python3 scripts/check-source.py
+      - name: Commit verified source and remove transport chunks
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm -r .runnerloom-bootstrap
+          git add -A
+          git commit -m 'feat: implement RunnerLoom control plane, CLI, secure enrollment and tested VM boundary'
+          git push origin HEAD:refs/heads/feat/runnerloom-core
