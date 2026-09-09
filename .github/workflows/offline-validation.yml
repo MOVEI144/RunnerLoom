@@ -1,0 +1,44 @@
+name: Offline validation bundle
+
+on:
+  push:
+    paths:
+      - '.github/workflows/offline-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Prepare reproducible offline review inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/runnerloom-offline"
+          mkdir -p "$root/source" "$root/out"
+          git archive HEAD | tar -xf - -C "$root/source"
+          go mod vendor
+          cp -a vendor "$root/source/vendor"
+          git rev-parse HEAD > "$root/source/SOURCE_COMMIT"
+          go version > "$root/source/TOOLCHAIN_VERSION"
+          tar -czf "$root/out/source-vendored.tar.gz" -C "$root" source
+          tar -czf "$root/out/go-toolchain.tar.gz" -C "$(go env GOROOT)" .
+          (cd "$root/out" && sha256sum *.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: runnerloom-offline-${{ github.sha }}
+          path: ${{ runner.temp }}/runnerloom-offline/out/
+          retention-days: 3
+          if-no-files-found: error
+          compression-level: 0
