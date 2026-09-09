@@ -1,0 +1,496 @@
+diff --git a/internal/core/reservation_test.go b/internal/core/reservation_test.go
+new file mode 100644
+index 0000000..ed5072d
+--- /dev/null
++++ b/internal/core/reservation_test.go
+@@ -0,0 +1,85 @@
++package core
++
++import (
++	"context"
++	"database/sql"
++	"testing"
++)
++
++// CPU/RAM returned by a stopped VM still belong to its hard-reserved slot
++// until that slot's disk cleanup finishes. General workloads must not borrow it.
++func TestReservationSurvivesPartialCleanup(t *testing.T) {
++	s, c := testStore(t)
++	observe(t, s, c, 1)
++	general := allocate(t, s, "linux-lite")
++	dedicated := allocate(t, s, "linux-heavy")
++	observe(t, s, c, 2,
++		VMReport{ID: general.ID, State: "Unknown"},
++		VMReport{ID: dedicated.ID, State: "Stopped"})
++	if _, e := s.Allocate(ctx, ID(), "linux-lite"); code(e) != "NO_CAPACITY" {
++		t.Fatalf("partially cleaned dedicated slot leaked into general capacity: %v", e)
++	}
++	// The slot becomes reusable for its owner only after all resources return.
++	observe(t, s, c, 3,
++		VMReport{ID: general.ID, State: "Unknown"},
++		VMReport{ID: dedicated.ID, State: "Deleted"})
++	replacement := allocate(t, s, "linux-heavy")
++	if replacement.Reservation != dedicated.Reservation {
++		t.Fatal("lost reservation ownership")
++	}
++}
++
++func TestReservationCannotMoveOrRetargetWhileHeld(t *testing.T) {
++	for _, change := range []string{"node", "pool"} {
++		t.Run(change, func(t *testing.T) {
++			s, c := testStore(t)
++			observe(t, s, c, 1)
++			_ = allocate(t, s, "linux-heavy")
++			if change == "node" {
++				n := c.Nodes[0]
++				n.Name = "node-b"
++				c.Nodes = append(c.Nodes, n)
++				c.Reservations[0].Node = n.Name
++			} else {
++				c.Reservations[0].Pool = "linux-lite"
++			}
++			p, e := s.Plan(ctx, c)
++			if e != nil {
++				t.Fatal(e)
++			}
++			if _, e = s.Apply(ctx, p.ID); code(e) != "RESERVATION_BUSY" {
++				t.Fatalf("in-use reservation changed its owner: %v", e)
++			}
++		})
++	}
++}
++
++func TestPartiallyReleasedReservationPreventsBudgetShrink(t *testing.T) {
++	s, c := testStore(t)
++	observe(t, s, c, 1)
++	general := allocate(t, s, "linux-lite")
++	dedicated := allocate(t, s, "linux-heavy")
++	observe(t, s, c, 2, VMReport{ID: general.ID, State: "Unknown"}, VMReport{ID: dedicated.ID, State: "Stopped"})
++	c.Nodes[0].Budget.CPU = 8 // enough for the reservation alone, but not it plus general
++	p, e := s.Plan(ctx, c)
++	if e != nil {
++		t.Fatal(e)
++	}
++	if _, e = s.Apply(ctx, p.ID); code(e) != "BUDGET_BUSY" {
++		t.Fatalf("budget shrink discarded protected reservation: %v", e)
++	}
++}
++
++func TestReservationCorruptionBlocksNewAllocation(t *testing.T) {
++	s, c := testStore(t)
++	observe(t, s, c, 1)
++	a := allocate(t, s, "linux-heavy")
++	// Simulates a damaged/restored database; do not silently release capacity.
++	a.Node = "node-that-no-longer-exists"
++	if e := s.transaction(context.Background(), func(tx *sql.Tx) error { return saveInstance(ctx, tx, a) }); e != nil {
++		t.Fatal(e)
++	}
++	if _, e := s.Allocate(ctx, ID(), "linux-lite"); code(e) != "NO_CAPACITY" {
++		t.Fatalf("corrupted reservation reference accepted: %v", e)
++	}
++}
+ diff --git a/internal/core/reservations.go b/internal/core/reservations.go
+new file mode 100644
+index 0000000..0248e7c
+--- /dev/null
++++ b/internal/core/reservations.go
+@@ -0,0 +1,48 @@
++package core
++
++// A reservation is identified by its name AND its node/pool owner. Moving a
++// live reservation would make the same slot appear consumed on the wrong node.
++func validateReservationOwners(c Config, runs []Instance) error {
++	byName := make(map[string]Reservation, len(c.Reservations))
++	for _, r := range c.Reservations {
++		byName[r.Name] = r
++	}
++	for _, a := range runs {
++		if a.Reservation == "" || a.Held.Empty() {
++			continue
++		}
++		r, ok := byName[a.Reservation]
++		if !ok || r.Node != a.Node || r.Pool != a.Pool.Name {
++			return Fail("RESERVATION_BUSY", "使用中の予約のNode・Poolを変更できません。片付け完了を待ってください", a.Reservation)
++		}
++	}
++	return nil
++}
++
++// reservationProtection returns the reserved resources not already accounted
++// for in Held, and the number of completely unused slots. Partially released
++// slots protect their returned components, but cannot be allocated again until
++// their remaining disk/GPU cleanup is confirmed. This keeps one resource ledger
++// without lending a dedicated pool's idle capacity to general jobs.
++func reservationProtection(c Config, r Reservation, runs []Instance) (Resources, int64, error) {
++	p, ok := c.Pool(r.Pool)
++	if !ok {
++		return Resources{}, 0, Fail("RESERVATION_INCONSISTENT", "予約のPoolがありません", r.Name)
++	}
++	used := int64(0)
++	held := Resources{}
++	for _, a := range runs {
++		if a.Reservation != r.Name || a.Held.Empty() {
++			continue
++		}
++		if a.Node != r.Node || a.Pool.Name != r.Pool || !a.Held.Fits(p.Charge()) {
++			return Resources{}, 0, Fail("RESERVATION_INCONSISTENT", "予約台帳と実行記録が一致しません", r.Name)
++		}
++		used++
++		held = held.Add(a.Held)
++	}
++	if used > r.Slots {
++		return Resources{}, 0, Fail("RESERVATION_BUSY", "使用中の予約を減らせません", r.Name)
++	}
++	return p.Charge().Mul(r.Slots).Sub(held), r.Slots - used, nil
++}
+ diff --git a/internal/core/store.go b/internal/core/store.go
+index e801ac1..deaefbd 100644
+--- a/internal/core/store.go
++++ b/internal/core/store.go
+@@ -333,6 +333,9 @@ func (s *Store) Apply(ctx context.Context, id string) (revision int64, err error
+ 	return
+ }
+ func checkCapacityUpdate(c Config, runs []Instance) error {
++	if e := validateReservationOwners(c, runs); e != nil {
++		return e
++	}
+ 	for _, p := range c.Pools {
+ 		count := int64(0)
+ 		for _, a := range runs {
+@@ -362,17 +365,11 @@ func checkCapacityUpdate(c Config, runs []Instance) error {
+ 			if r.Node != n.Name {
+ 				continue
+ 			}
+-			p, _ := c.Pool(r.Pool)
+-			used := int64(0)
+-			for _, a := range runs {
+-				if a.Reservation == r.Name && !a.Held.Empty() {
+-					used++
+-				}
+-			}
+-			if used > r.Slots {
+-				return Fail("RESERVATION_BUSY", "使用中の予約を減らせません", r.Name)
++			protected, _, e := reservationProtection(c, r, runs)
++			if e != nil {
++				return e
+ 			}
+-			held = held.Add(p.Charge().Mul(r.Slots - used))
++			held = held.Add(protected)
+ 		}
+ 		if !held.Fits(n.Budget) {
+ 			return Fail("BUDGET_BUSY", "割り当て済み・予約済みの資源を下回っています", n.Name)
+@@ -463,6 +460,7 @@ type Candidate struct {
+ }
+ 
+ func candidates(c Config, p Pool, runs []Instance, obs map[string]Observation, now time.Time) []Candidate {
++	reservationErr := validateReservationOwners(c, runs)
+ 	rows := []Candidate{}
+ 	count := int64(0)
+ 	for _, a := range runs {
+@@ -473,6 +471,9 @@ func candidates(c Config, p Pool, runs []Instance, obs map[string]Observation, n
+ 	im, _ := c.Image(p.Image)
+ 	for _, n := range c.Nodes {
+ 		v := Candidate{Node: n.Name, Available: n.Budget, Reasons: []string{}}
++		if reservationErr != nil {
++			v.Reasons = append(v.Reasons, "RESERVATION_INCONSISTENT")
++		}
+ 		held := Resources{}
+ 		unused := Resources{}
+ 		if !p.Enabled {
+@@ -506,15 +507,12 @@ func candidates(c Config, p Pool, runs []Instance, obs map[string]Observation, n
+ 			if r.Node != n.Name {
+ 				continue
+ 			}
+-			rp, _ := c.Pool(r.Pool)
+-			used := int64(0)
+-			for _, a := range runs {
+-				if a.Reservation == r.Name && !a.Held.Empty() {
+-					used++
+-				}
++			protected, slots, e := reservationProtection(c, r, runs)
++			if e != nil {
++				v.Reasons = append(v.Reasons, "RESERVATION_INCONSISTENT")
++				continue
+ 			}
+-			slots := max(int64(0), r.Slots-used)
+-			unused = unused.Add(rp.Charge().Mul(slots))
++			unused = unused.Add(protected)
+ 			if slots > 0 && r.Pool == p.Name && v.Reservation == "" {
+ 				v.Reservation = r.Name
+ 			}
+ diff --git a/internal/host/guest_service_test.go b/internal/host/guest_service_test.go
+new file mode 100644
+index 0000000..f5b301a
+--- /dev/null
++++ b/internal/host/guest_service_test.go
+@@ -0,0 +1,28 @@
++package host
++
++import (
++	"github.com/MOVEI144/RunnerLoom/internal/core"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestGuestJobIsIndependentOfCloudFinalAndSerialLogin(t *testing.T) {
++	a := core.Instance{Deadline: time.Now().Add(time.Hour)}
++	for _, diagnostic := range []bool{false, true} {
++		config := string(cloudConfig(a, "TEST_JIT", diagnostic, "172.30.240.1:1234"))
++		for _, want := range []string{
++			"After=cloud-final.service network-online.target", "StandardOutput=journal+console",
++			"StandardError=journal+console", "StandardInput=null", "Restart=no",
++			"[systemctl, start, --no-block, runnerloom-job.service]",
++			"[systemctl, mask, --now, serial-getty@ttyS0.service]",
++		} {
++			if !strings.Contains(config, want) {
++				t.Fatal("missing guest lifecycle requirement", want)
++			}
++		}
++		if strings.Contains(config, ">/dev/ttyS0") {
++			t.Fatal("payload must not inherit a login terminal")
++		}
++	}
++}
+ diff --git a/internal/host/network.go b/internal/host/network.go
+index 2e2eb5e..dd02c3f 100644
+--- a/internal/host/network.go
++++ b/internal/host/network.go
+@@ -13,6 +13,7 @@ import (
+ 	"net/netip"
+ 	"os/exec"
+ 	"path/filepath"
++	"reflect"
+ 	"regexp"
+ 	"sort"
+ 	"strings"
+@@ -221,6 +222,9 @@ func (n Network) Check(ctx context.Context) error {
+ 	if e != nil {
+ 		return e
+ 	}
++	if e = verifyNetworkPolicy(b, []byte(p.XML)); e != nil {
++		return e
++	}
+ 	if uuid != seal.UUID {
+ 		return errors.New("network identity changed")
+ 	}
+@@ -289,7 +293,7 @@ func (n Network) Apply(ctx context.Context) error {
+ 		if r.Dst == "default" || r.Dev == p.Bridge {
+ 			continue
+ 		}
+-		actual, e := netip.ParsePrefix(r.Dst)
++		actual, e := routePrefix(r.Dst)
+ 		if e == nil && wanted.Overlaps(actual) {
+ 			return fmt.Errorf("VM subnet conflicts with existing route %s", r.Dst)
+ 		}
+@@ -300,6 +304,9 @@ func (n Network) Apply(ctx context.Context) error {
+ 		if _, e = verifyNetwork(b, n.Cluster, p.Name, p.Bridge); e != nil {
+ 			return e
+ 		}
++		if e = verifyNetworkPolicy(b, []byte(p.XML)); e != nil {
++			return e
++		}
+ 		exists = true
+ 	}
+ 	// Refuse to overwrite an nft table without our existing private ownership seal.
+@@ -351,6 +358,9 @@ func (n Network) Apply(ctx context.Context) error {
+ 	if e != nil {
+ 		return e
+ 	}
++	if e = verifyNetworkPolicy(b, []byte(p.XML)); e != nil {
++		return e
++	}
+ 	b, e = n.Exec.Run(ctx, "nft", []string{"-j", "list", "table", "inet", p.Table}, nil)
+ 	if e != nil {
+ 		return e
+@@ -365,3 +375,79 @@ func (n Network) Apply(ctx context.Context) error {
+ 	}
+ 	return n.Check(ctx)
+ }
++
++// A libvirt UUID proves ownership, not isolation. Check the security-relevant
++// configuration too; generated UUID/MAC and harmless NAT port defaults are not
++// policy. Slice fields also make duplicate elements visible instead of letting
++// encoding/xml silently accept only their last value.
++type networkPolicy struct {
++	IPv6    string `xml:"ipv6,attr"`
++	Forward []struct {
++		Mode       string     `xml:"mode,attr"`
++		Dev        string     `xml:"dev,attr"`
++		Interfaces []struct{} `xml:"interface"`
++	} `xml:"forward"`
++	Bridge []struct {
++		Name  string `xml:"name,attr"`
++		STP   string `xml:"stp,attr"`
++		Delay string `xml:"delay,attr"`
++	} `xml:"bridge"`
++	Port []struct {
++		Isolated string `xml:"isolated,attr"`
++	} `xml:"port"`
++	IP []struct {
++		Family  string `xml:"family,attr"`
++		Address string `xml:"address,attr"`
++		Netmask string `xml:"netmask,attr"`
++		Prefix  string `xml:"prefix,attr"`
++		DHCP    []struct {
++			Ranges []struct {
++				Start string `xml:"start,attr"`
++				End   string `xml:"end,attr"`
++			} `xml:"range"`
++			Hosts []struct{} `xml:"host"`
++			BootP []struct{} `xml:"bootp"`
++		} `xml:"dhcp"`
++		TFTP []struct{} `xml:"tftp"`
++	} `xml:"ip"`
++	Routes      []struct{} `xml:"route"`
++	VirtualPort []struct{} `xml:"virtualport"`
++}
++
++func verifyNetworkPolicy(actual, expected []byte) error {
++	var got, want networkPolicy
++	if e := xml.Unmarshal(actual, &got); e != nil {
++		return e
++	}
++	if e := xml.Unmarshal(expected, &want); e != nil {
++		return e
++	}
++	// libvirt may omit the default IPv6=no and family=ipv4 attributes.
++	normalize := func(p *networkPolicy) {
++		if p.IPv6 == "" {
++			p.IPv6 = "no"
++		}
++		for i := range p.IP {
++			if p.IP[i].Family == "" {
++				p.IP[i].Family = "ipv4"
++			}
++		}
++	}
++	normalize(&got)
++	normalize(&want)
++	if !reflect.DeepEqual(got, want) {
++		return errors.New("libvirt network security policy drift; drain and inspect the network before reapplying")
++	}
++	return nil
++}
++func routePrefix(dst string) (netip.Prefix, error) {
++	p, e := netip.ParsePrefix(dst)
++	if e == nil {
++		return p.Masked(), nil
++	}
++	ip, e := netip.ParseAddr(dst)
++	if e != nil {
++		return netip.Prefix{}, e
++	}
++	return netip.PrefixFrom(ip, ip.BitLen()), nil
++}
+ diff --git a/internal/host/network_policy_test.go b/internal/host/network_policy_test.go
+new file mode 100644
+index 0000000..cb90c40
+--- /dev/null
++++ b/internal/host/network_policy_test.go
+@@ -0,0 +1,44 @@
++package host
++
++import (
++	"context"
++	"strings"
++	"testing"
++)
++
++func TestNetworkSecurityDriftPreservesIdentityButMustFail(t *testing.T) {
++	mutations := map[string]func(string) string{
++		"routed":         func(x string) string { return strings.Replace(x, `mode="nat"`, `mode="route"`, 1) },
++		"ipv6":           func(x string) string { return strings.Replace(x, `ipv6="no"`, `ipv6="yes"`, 1) },
++		"peer-isolation": func(x string) string { return strings.Replace(x, `isolated="yes"`, `isolated="no"`, 1) },
++		"gateway": func(x string) string {
++			return strings.Replace(x, `address="172.30.240.1"`, `address="172.30.241.1"`, 1)
++		},
++		"extra-ipv6": func(x string) string {
++			return strings.Replace(x, `</network>`, `<ip family="ipv6" address="fd00::1" prefix="64"/></network>`, 1)
++		},
++		"extra-route": func(x string) string {
++			return strings.Replace(x, `</network>`, `<route address="10.0.0.0" prefix="8" gateway="172.30.240.2"/></network>`, 1)
++		},
++	}
++	for name, mutate := range mutations {
++		t.Run(name, func(t *testing.T) {
++			n, fake := networkFixture(t)
++			if e := n.Apply(context.Background()); e != nil {
++				t.Fatal(e)
++			}
++			fake.NetworkXML = mutate(fake.NetworkXML)
++			if e := n.Check(context.Background()); e == nil {
++				t.Fatal("security drift accepted with same network UUID")
++			}
++		})
++	}
++}
++
++func TestHostRouteConflictsWithVMSubnet(t *testing.T) {
++	n, fake := networkFixture(t)
++	fake.Routes = `[{"dst":"172.30.240.91","dev":"eth0"}]`
++	if e := n.Apply(context.Background()); e == nil {
++		t.Fatal("host route inside VM subnet was ignored")
++	}
++}
+ diff --git a/internal/host/provider.go b/internal/host/provider.go
+index 73f72fd..50d856c 100644
+--- a/internal/host/provider.go
++++ b/internal/host/provider.go
+@@ -284,7 +284,7 @@ func (l *Libvirt) DomainXML(a core.Instance) (string, error) {
+ func cloudConfig(a core.Instance, jit string, diagnostic bool, probes ...string) []byte {
+ 	run := `#!/bin/bash
+ set -eu
+-trap 'rm -f /run/runnerloom-jit; sync; systemctl poweroff --no-block' EXIT
++trap 'rc=$?; trap - EXIT; echo RUNNERLOOM_JOB_EXIT_CODE=$rc; rm -f /run/runnerloom-jit; sync; systemctl poweroff --no-block; exit $rc' EXIT
+ chmod 0600 /run/runnerloom-jit
+ chown runner:runner /run/runnerloom-jit
+ cd /opt/actions-runner
+@@ -304,10 +304,10 @@ cd /opt/actions-runner`, 1)
+ 	if diagnostic {
+ 		run = `#!/bin/bash
+ set -eu
+-trap 'sync; systemctl poweroff --no-block' EXIT
++trap 'rc=$?; trap - EXIT; echo RUNNERLOOM_DIAGNOSTIC_EXIT_CODE=$rc; sync; systemctl poweroff --no-block; exit $rc' EXIT
+ echo RUNNERLOOM_REAL_VM_STARTED
+ uname -a
+-python3 - <<'PY'
++python3 -u - <<'PY'
+ import socket,urllib.request,json,tempfile,pathlib,hashlib
+ probe=json.loads(RUNNERLOOM_PROBE_JSON)
+ if probe:
+@@ -316,6 +316,7 @@ if probe:
+     try: s.connect((target,int(port))); raise SystemExit('Host isolation failed: reachable test service')
+     except (TimeoutError,OSError): pass
+     finally: s.close()
++    print('RUNNERLOOM_HOST_ISOLATION_OK',flush=True)
+ with urllib.request.urlopen('https://github.com/robots.txt',timeout=30) as response:
+     assert response.status==200
+ print('RUNNERLOOM_PUBLIC_HTTPS_OK')
+@@ -344,7 +345,25 @@ echo RUNNERLOOM_REAL_VM_COMPLETED
+ 	}
+ 	// JSON string scalars are also valid YAML scalars. No interpolation can add YAML keys.
+ 	quote := func(s string) string { b, _ := json.Marshal(s); return string(b) }
+-	return []byte("#cloud-config\nssh_pwauth: false\ndisable_root: true\nusers:\n  - name: runner\n    lock_passwd: true\n    shell: /bin/bash\n    sudo: ['ALL=(ALL) NOPASSWD:ALL']\nwrite_files:\n  - path: /run/runnerloom-jit\n    permissions: '0600'\n    content: " + quote(jit) + "\n  - path: /usr/local/sbin/runnerloom-job\n    permissions: '0700'\n    content: " + quote(run) + "\nruncmd:\n  - [bash, -c, 'exec /usr/local/sbin/runnerloom-job >/dev/ttyS0 2>&1']\n")
++	// Do not run a long job inside cloud-final or attach it to agetty's TTY.
++	// agetty may hang up/reset that terminal during boot, killing the payload.
++	// A dedicated service starts after cloud-final and forwards logs via journald.
++	unit := `[Unit]
++Description=RunnerLoom one-job guest
++After=cloud-final.service network-online.target
++Wants=network-online.target
++ConditionPathExists=/usr/local/sbin/runnerloom-job
++[Service]
++Type=exec
++ExecStart=/usr/local/sbin/runnerloom-job
++StandardInput=null
++StandardOutput=journal+console
++StandardError=journal+console
++SyslogIdentifier=runnerloom-job
++Restart=no
++TimeoutStopSec=45s
++`
++	return []byte("#cloud-config\nssh_pwauth: false\ndisable_root: true\nbootcmd:\n  - [systemctl, mask, --now, serial-getty@ttyS0.service]\nusers:\n  - name: runner\n    lock_passwd: true\n    shell: /bin/bash\n    sudo: ['ALL=(ALL) NOPASSWD:ALL']\nwrite_files:\n  - path: /run/runnerloom-jit\n    permissions: '0600'\n    content: " + quote(jit) + "\n  - path: /usr/local/sbin/runnerloom-job\n    permissions: '0700'\n    content: " + quote(run) + "\n  - path: /etc/systemd/system/runnerloom-job.service\n    permissions: '0644'\n    content: " + quote(unit) + "\nruncmd:\n  - [systemctl, daemon-reload]\n  - [systemctl, start, --no-block, runnerloom-job.service]\n")
+ }
+ func (l *Libvirt) ensureConsole(id string, dir string) error {
+ 	if l.consoles == nil {
