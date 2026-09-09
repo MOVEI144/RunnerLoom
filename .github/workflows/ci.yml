@@ -69,11 +69,8 @@ jobs:
         with:
           go-version: '1.27.1'
           cache: true
-      - name: Reclaim disposable CI-host disk space
-        run: |
-          test "$GITHUB_ACTIONS" = true
-          sudo rm -rf /usr/local/lib/android /opt/ghc
-          df -h /
+      - name: Prepare capacity on the disposable GitHub-hosted runner
+        run: bash scripts/ci-free-space.sh
       - name: Install isolated CI-host virtualization tools
         run: |
           sudo apt-get update -qq
@@ -107,11 +104,8 @@ jobs:
         with:
           go-version: '1.27.1'
           cache: true
-      - name: Reclaim disposable CI-host disk space
-        run: |
-          test "$GITHUB_ACTIONS" = true
-          sudo rm -rf /usr/local/lib/android /opt/ghc
-          df -h /
+      - name: Prepare capacity on the disposable GitHub-hosted runner
+        run: bash scripts/ci-free-space.sh
       - name: Install image builder and virtualization tools
         run: |
           sudo apt-get update -qq

@@ -146,7 +146,7 @@ func (a *App) addOperations(root *cobra.Command) {
 		if a.JSON {
 			return a.output(map[string]any{"id": args[0], "log": string(b)})
 		}
-		_, e = a.Out.Write(b)
+		_, e = io.WriteString(a.Out, terminalSafeLog(b))
 		return e
 	})
 	logs.Flags().StringVar(&logConfig, "config", "", "Nodeのagent.json")
