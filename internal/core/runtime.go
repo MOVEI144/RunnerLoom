@@ -96,7 +96,7 @@ func Doctor() []Check {
 	if runtime.GOOS != "linux" || runtime.GOARCH != "amd64" {
 		checks[0].Status = "fail"
 	}
-	for _, item := range []struct{ Name, Path string }{{"kvm", "/dev/kvm"}, {"libvirt", "/usr/bin/virsh"}, {"qemu", "/usr/bin/qemu-system-x86_64"}, {"qemu-img", "/usr/bin/qemu-img"}, {"cloud-init-seed", "/usr/bin/cloud-localds"}, {"firewall", "/usr/sbin/nft"}} {
+	for _, item := range []struct{ Name, Path string }{{"kvm", "/dev/kvm"}, {"libvirt", "/usr/bin/virsh"}, {"qemu", "/usr/bin/qemu-system-x86_64"}, {"qemu-img", "/usr/bin/qemu-img"}, {"cloud-init-seed", "/usr/bin/cloud-localds"}, {"firewall", "/usr/sbin/nft"}, {"dhcp", "/usr/sbin/dnsmasq"}} {
 		state := "pass"
 		detail := item.Path
 		if _, e := os.Stat(item.Path); e != nil {

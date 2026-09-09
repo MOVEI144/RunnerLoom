@@ -11,6 +11,7 @@ mkdir -p "$ROOT" "$EVIDENCE"
 sudo install -d -m 0700 "$STATE"
 finish() {
   status=$?
+  for diagnostic in "$EVIDENCE"/*.json; do [[ -f "$diagnostic" ]] && cat "$diagnostic" || true; done
   sudo virsh -c qemu:///system list --all > "$EVIDENCE/domains-after.txt" 2>&1 || true
   sudo journalctl -u libvirtd --no-pager -n 100 > "$EVIDENCE/libvirt.log" 2>&1 || true
   sudo find "$STATE" -path '*/logs/*.log' -type f -exec cp '{}' "$EVIDENCE/" \; 2>/dev/null || true

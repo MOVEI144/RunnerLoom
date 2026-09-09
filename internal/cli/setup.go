@@ -8,6 +8,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -353,6 +357,32 @@ func (a *App) addSmoke(root *cobra.Command) {
 		}
 		p := &host.Libvirt{StateDir: conf.StateDir, DiskDir: conf.DiskDir, Node: conf.Node, Cluster: conf.Cluster, Ceiling: conf.Ceiling, Network: network, Images: images, Exec: ex, QEMUUser: conf.QEMUUser, Emulator: mode}
 		defer p.Close()
+		prefix, e := netip.ParsePrefix(conf.NetworkCIDR)
+		if e != nil {
+			return e
+		}
+		ip := prefix.Addr().As4()
+		ip[3] = 1
+		probeListener, e := net.Listen("tcp", net.JoinHostPort(netip.AddrFrom4(ip).String(), "0"))
+		if e != nil {
+			return e
+		}
+		probeServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = io.WriteString(w, "RunnerLoom host isolation probe")
+		}), ReadHeaderTimeout: 3 * time.Second}
+		defer probeServer.Close()
+		go func() { _ = probeServer.Serve(probeListener) }()
+		p.DiagnosticProbe = probeListener.Addr().String()
+		localClient := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 5 * time.Second}
+		defer localClient.CloseIdleConnections()
+		baseline, e := localClient.Get("http://" + p.DiagnosticProbe)
+		if e != nil {
+			return e
+		}
+		baseline.Body.Close()
+		if baseline.StatusCode != 200 {
+			return errors.New("host probe baseline failed")
+		}
 		now := time.Now().UTC()
 		instance := core.Instance{ID: core.ID(), RequestID: core.ID(), Node: conf.Node, Pool: core.Pool{Name: "smoke", RunnerName: "smoke", Image: "smoke", VCPU: 2, MemoryMiB: 2048, OverheadMiB: 512, RootGiB: 20, DiskOverheadGiB: 2, MaxRunners: 1, ExecutionMinutes: 10, Enabled: true}, Image: core.Image{Name: "smoke", Digest: digest, MinimumRootGiB: 20}, Created: now, Deadline: now.Add(timeout), State: "Reserved"}
 		ctx, cancel := context.WithTimeout(c.Context(), timeout)
@@ -379,6 +409,9 @@ func (a *App) addSmoke(root *cobra.Command) {
 					}
 					if !bytes.Contains(log, []byte("RUNNERLOOM_REAL_VM_COMPLETED")) || !bytes.Contains(log, []byte("RUNNERLOOM_LAN_PROBES_BLOCKED")) {
 						return errors.New("実VMの診断完了を確認できません。ログを確認してください")
+					}
+					if !bytes.Contains(log, []byte("RUNNERLOOM_PUBLIC_HTTPS_OK")) || !bytes.Contains(log, []byte("RUNNERLOOM_CPU_AND_DISK_JOB_OK")) {
+						return errors.New("VMの公開HTTPS接続またはCPU・ディスク検証が完了していません")
 					}
 					if e = p.Delete(ctx, instance.ID); e != nil {
 						return e

@@ -29,18 +29,19 @@ type Provider interface {
 	Ready(context.Context) error
 }
 type Libvirt struct {
-	StateDir string
-	DiskDir  string
-	Node     string
-	Cluster  string
-	Ceiling  core.Resources
-	Network  Network
-	Images   *Images
-	Exec     Executor
-	QEMUUser string
-	Emulator string
-	mu       sync.Mutex
-	consoles map[string]net.Listener
+	DiagnosticProbe string
+	StateDir        string
+	DiskDir         string
+	Node            string
+	Cluster         string
+	Ceiling         core.Resources
+	Network         Network
+	Images          *Images
+	Exec            Executor
+	QEMUUser        string
+	Emulator        string
+	mu              sync.Mutex
+	consoles        map[string]net.Listener
 }
 type manifest struct {
 	Instance   core.Instance `json:"instance"`
@@ -280,7 +281,7 @@ func (l *Libvirt) DomainXML(a core.Instance) (string, error) {
 	}
 	return fmt.Sprintf(`<domain type="%s"><name>%s</name><uuid>%s</uuid><metadata><owner xmlns="urn:runnerloom:vm" cluster="%s" node="%s" id="%s" spec="%s"/></metadata><memory unit="MiB">%d</memory><currentMemory unit="MiB">%d</currentMemory><vcpu placement="static">%d</vcpu><os><type arch="x86_64" machine="q35">hvm</type><boot dev="hd"/><bootmenu enable="no"/></os><features><acpi/><apic/></features>%s<clock offset="utc"/><on_poweroff>destroy</on_poweroff><on_reboot>destroy</on_reboot><on_crash>destroy</on_crash><devices><emulator>/usr/bin/qemu-system-x86_64</emulator>%s<interface type="network"><mac address="%s"/><source network="%s"/><model type="virtio"/><port isolated="yes"/><filterref filter="clean-traffic"><parameter name="CTRL_IP_LEARNING" value="dhcp"/></filterref></interface><serial type="unix"><source mode="connect" path="%s"><reconnect enabled="yes" timeout="5"/></source><target port="0"/></serial><memballoon model="none"/><rng model="virtio"><backend model="random">/dev/urandom</backend></rng></devices></domain>`, kind, a.Name(), uuid, l.Cluster, l.Node, a.ID, core.Fingerprint(a.Pool), a.Pool.MemoryMiB, a.Pool.MemoryMiB, a.Pool.VCPU, cpu, disks, mac, network, escaped(filepath.Join(dir, "serial.sock"))), nil
 }
-func cloudConfig(a core.Instance, jit string, diagnostic bool) []byte {
+func cloudConfig(a core.Instance, jit string, diagnostic bool, probes ...string) []byte {
 	run := `#!/bin/bash
 set -eu
 trap 'rm -f /run/runnerloom-jit; sync; systemctl poweroff --no-block' EXIT
@@ -307,16 +308,39 @@ trap 'sync; systemctl poweroff --no-block' EXIT
 echo RUNNERLOOM_REAL_VM_STARTED
 uname -a
 python3 - <<'PY'
-import socket
-for target in ['10.0.0.1', '192.168.1.1', '169.254.169.254']:
-    s=socket.socket();s.settimeout(1)
-    try: s.connect((target,80)); raise SystemExit('LAN isolation failed: '+target)
-    except (TimeoutError, OSError): pass
+import socket,urllib.request,json,tempfile,pathlib,hashlib
+probe=json.loads(RUNNERLOOM_PROBE_JSON)
+if probe:
+    target,port=probe.rsplit(':',1)
+    s=socket.socket();s.settimeout(3)
+    try: s.connect((target,int(port))); raise SystemExit('Host isolation failed: reachable test service')
+    except (TimeoutError,OSError): pass
     finally: s.close()
+with urllib.request.urlopen('https://github.com/robots.txt',timeout=30) as response:
+    assert response.status==200
+print('RUNNERLOOM_PUBLIC_HTTPS_OK')
+with tempfile.TemporaryDirectory() as d:
+    p=pathlib.Path(d)/'work';payload=b'RunnerLoom CPU job\n'*4096;p.write_bytes(payload)
+    assert hashlib.sha256(p.read_bytes()).digest()==hashlib.sha256(payload).digest()
+assert sum(i*i for i in range(10000))==333283335000
+print('RUNNERLOOM_CPU_AND_DISK_JOB_OK')
 print('RUNNERLOOM_LAN_PROBES_BLOCKED')
 PY
+if [ -x /opt/actions-runner/bin/Runner.Listener ]; then
+  runuser -u runner -- /opt/actions-runner/bin/Runner.Listener --version
+  echo RUNNERLOOM_GITHUB_RUNNER_PRESENT
+fi
 echo RUNNERLOOM_REAL_VM_COMPLETED
 `
+	}
+	if diagnostic {
+		probe := ""
+		if len(probes) > 0 {
+			probe = probes[0]
+		}
+		encoded, _ := json.Marshal(probe)
+		literal, _ := json.Marshal(string(encoded))
+		run = strings.ReplaceAll(run, "RUNNERLOOM_PROBE_JSON", string(literal))
 	}
 	// JSON string scalars are also valid YAML scalars. No interpolation can add YAML keys.
 	quote := func(s string) string { b, _ := json.Marshal(s); return string(b) }
@@ -564,7 +588,7 @@ func (l *Libvirt) ensure(ctx context.Context, a core.Instance, jit string, diagn
 	if e = core.PrivateDir(private); e != nil {
 		return e
 	}
-	if e = core.WritePrivate(filepath.Join(private, "user-data"), cloudConfig(a, jit, diagnostic)); e != nil {
+	if e = core.WritePrivate(filepath.Join(private, "user-data"), cloudConfig(a, jit, diagnostic, l.DiagnosticProbe)); e != nil {
 		return e
 	}
 	if e = core.WritePrivate(filepath.Join(private, "meta-data"), []byte("instance-id: "+a.ID+"\nlocal-hostname: "+a.Name()+"\n")); e != nil {

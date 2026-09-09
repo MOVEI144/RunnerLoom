@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"syscall"
@@ -73,7 +74,10 @@ func (SystemExecutor) Run(ctx context.Context, name string, args []string, input
 		return nil, errors.New("host helper output exceeds limit")
 	}
 	if e != nil {
-		return nil, fmt.Errorf("%s failed (%w)", name, e)
+		detail := strings.TrimSpace(errout.String())
+		detail = regexp.MustCompile(`[A-Za-z0-9_+/=-]{128,}`).ReplaceAllString(detail, "[redacted]")
+		detail = regexp.MustCompile(`gh[pousr]_[A-Za-z0-9_]+`).ReplaceAllString(detail, "[redacted]")
+		return nil, fmt.Errorf("%s failed (%w): %.1500s", name, e, detail)
 	}
 	return out.Bytes(), nil
 }
@@ -133,7 +137,7 @@ func (n Network) Plan() (NetworkPlan, error) {
 		for _, addr := range addrs {
 			p, e := netip.ParsePrefix(addr.String())
 			if e == nil && p.Addr().Is4() && !p.Addr().IsPrivate() && !p.Addr().IsLoopback() && !p.Addr().IsLinkLocalUnicast() {
-				blocked = append(blocked, p.Addr().String()+"/32")
+				blocked = append(blocked, p.Masked().String())
 			}
 		}
 	}
@@ -329,7 +333,12 @@ func (n Network) Apply(ctx context.Context) error {
 			return e
 		}
 	}
-	_, _ = n.Exec.Run(ctx, "virsh", []string{"--connect", "qemu:///system", "net-start", p.Name}, nil)
+	if _, startErr := n.Exec.Run(ctx, "virsh", []string{"--connect", "qemu:///system", "net-start", p.Name}, nil); startErr != nil {
+		info, infoErr := n.Exec.Run(ctx, "virsh", []string{"--connect", "qemu:///system", "net-info", p.Name}, nil)
+		if infoErr != nil || !strings.Contains(strings.Join(strings.Fields(string(info)), " "), "Active: yes") {
+			return fmt.Errorf("VM network could not start: %w", startErr)
+		}
+	}
 	// Do not libvirt-autostart the network before firewall restoration on reboot.
 	if _, e = n.Exec.Run(ctx, "virsh", []string{"--connect", "qemu:///system", "net-autostart", p.Name, "--disable"}, nil); e != nil {
 		return e

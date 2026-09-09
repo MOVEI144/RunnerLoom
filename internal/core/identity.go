@@ -219,6 +219,9 @@ func ClientTLS(caPEM []byte, pin, hostname string, certificate *tls.Certificate)
 	return cfg, nil
 }
 func NodeIdentity(cert *x509.Certificate, cluster string) (string, error) {
+	if cert != nil && (time.Now().Before(cert.NotBefore) || !time.Now().Before(cert.NotAfter)) {
+		return "", errors.New("node certificate is expired or not yet valid")
+	}
 	if cert == nil || cert.IsCA || len(cert.URIs) != 1 {
 		return "", errors.New("invalid node certificate")
 	}
