@@ -73,6 +73,9 @@ func Discover(ctx context.Context, timeout time.Duration) ([]Candidate, error) {
 	if timeout < time.Second || timeout > 30*time.Second {
 		return nil, errors.New("discovery timeout must be 1..30 seconds")
 	}
+	if e := ctx.Err(); e != nil {
+		return nil, e
+	}
 	if _, e := exec.LookPath("/usr/bin/avahi-browse"); e != nil {
 		return nil, errors.New("LAN discovery requires the optional avahi-utils package; invitation URLs work without discovery")
 	}
@@ -83,11 +86,18 @@ func Discover(ctx context.Context, timeout time.Duration) ([]Candidate, error) {
 	out := &boundedOutput{limit: 1 << 20}
 	cmd.Stdout = out
 	e := cmd.Run()
+	return discoveryResult(ctx, out, e)
+}
+
+func discoveryResult(ctx context.Context, out *boundedOutput, commandErr error) ([]Candidate, error) {
+	if e := ctx.Err(); e != nil {
+		return nil, e
+	}
 	b := out.Bytes()
 	if out.overflow {
 		return nil, errors.New("discovery response exceeded limit")
 	}
-	if e != nil && ctx.Err() == nil {
+	if commandErr != nil {
 		return nil, errors.New("Avahi discovery failed; check avahi-daemon or use an invitation URL")
 	}
 	return Parse(string(b)), nil
@@ -100,7 +110,11 @@ func Publish(ctx context.Context, cluster, endpoint, pin string) (func(), error)
 	if e != nil || u.Scheme != "https" || u.User != nil || u.Path != "" || u.Hostname() == "" || u.RawQuery != "" || u.Fragment != "" || len(endpoint) > 240 {
 		return nil, errors.New("invalid advertised URL")
 	}
-	if ip := net.ParseIP(u.Hostname()); ip != nil && ip.IsLoopback() {
+	hostname := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if hostname == "localhost" || strings.HasSuffix(hostname, ".localhost") {
+		return nil, errors.New("LAN discovery requires a LAN-reachable controller address")
+	}
+	if ip := net.ParseIP(hostname); ip != nil && ip.IsLoopback() {
 		return nil, errors.New("LAN discovery requires a LAN-reachable controller address")
 	}
 	port := u.Port()

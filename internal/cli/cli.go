@@ -285,14 +285,17 @@ func (a *App) Command() *cobra.Command {
 		if e != nil {
 			return e
 		}
+		if _, e = os.Lstat(inviteOut); !os.IsNotExist(e) {
+			return errors.New("招待の保存先は新規ファイルにしてください")
+		}
+		if e = core.PrivateDir(filepath.Dir(inviteOut)); e != nil {
+			return e
+		}
 		v, e := s.Invite(c.Context(), ca, endpoint, ttl)
 		if e != nil {
 			return e
 		}
 		b, _ := json.MarshalIndent(v, "", "  ")
-		if _, e = os.Lstat(inviteOut); !os.IsNotExist(e) {
-			return errors.New("招待の保存先は新規ファイルにしてください")
-		}
 		if e = core.WritePrivate(inviteOut, b); e != nil {
 			return e
 		}

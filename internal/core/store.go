@@ -140,9 +140,26 @@ func OpenStore(dir string) (*Store, error) {
 		if ce == nil {
 			ce = f.Sync()
 		}
-		f.Close()
+		closeErr := f.Close()
 		if ce != nil {
 			return nil, ce
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		// Persist the key's directory entry before the FULL-synchronous database
+		// can commit encrypted data; fsync on the file alone is insufficient.
+		d, ce := os.Open(dir)
+		if ce != nil {
+			return nil, ce
+		}
+		ce = d.Sync()
+		closeErr = d.Close()
+		if ce != nil {
+			return nil, ce
+		}
+		if closeErr != nil {
+			return nil, closeErr
 		}
 	} else if e != nil {
 		return nil, e

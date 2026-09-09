@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Validate distribution checksums and test the extracted CLI, without installation."""
 import hashlib,json,pathlib,subprocess,sys,tarfile,tempfile
+if sys.version_info < (3, 12):
+    raise SystemExit("Package verification requires Python 3.12 or newer")
 root=pathlib.Path(sys.argv[1] if len(sys.argv)>1 else 'dist').resolve()
 for line in (root/'SHA256SUMS').read_text().splitlines():
     expected,name=line.split('  ',1)

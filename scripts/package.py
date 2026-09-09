@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Build a versioned Linux/amd64 archive and optional .deb; never install services."""
 from __future__ import annotations
-import argparse, gzip, hashlib, io, json, os, pathlib, re, shutil, subprocess, tarfile, tempfile
+import argparse, gzip, hashlib, io, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile
+
+if sys.version_info < (3, 12):
+    raise SystemExit("Packaging requires Python 3.12 or newer")
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[a-z0-9]+(?:\.[a-z0-9]+)*)?")

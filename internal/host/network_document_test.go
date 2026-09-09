@@ -55,9 +55,17 @@ func TestNetworkAllowsMaterializedLibvirtDefaults(t *testing.T) {
 		t.Fatal(e)
 	}
 	x := fake.NetworkXML
-	x = strings.Replace(x, `<network ipv6="no">`, `<network connections="2">`, 1)
-	x = strings.Replace(x, `<forward mode="nat"/>`, `<forward mode="nat"><nat><port start="1024" end="65535"/></nat></forward>`, 1)
-	x = strings.Replace(x, `</network>`, `<mac address="52:54:00:00:12:34"/></network>`, 1)
+	for _, replacement := range [][2]string{
+		{`<network ipv6="no">`, `<network connections="2">`},
+		{`<forward mode="nat"/>`, `<forward mode="nat"><nat><port start="1024" end="65535"/></nat></forward>`},
+		{`</network>`, `<mac address="52:54:00:00:12:34"/></network>`},
+	} {
+		next := strings.Replace(x, replacement[0], replacement[1], 1)
+		if next == x {
+			t.Fatalf("fixture no longer contains %q", replacement[0])
+		}
+		x = next
+	}
 	fake.NetworkXML = x
 	if e := n.Check(context.Background()); e != nil {
 		t.Fatal(e)

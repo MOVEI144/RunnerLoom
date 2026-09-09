@@ -151,7 +151,12 @@ func (a *auth) CheckAccess(ctx context.Context, c core.Config) error {
 			Private  bool   `json:"private"`
 			FullName string `json:"full_name"`
 		}
-		if e := a.get(ctx, "/repos/"+repo, &r); e != nil {
+		owner, name, ok := strings.Cut(repo, "/")
+		if !ok || owner == "" || name == "" || strings.Contains(name, "/") {
+			return core.Fail("INVALID_CONFIG", "Repositoryはowner/name形式で指定してください", nil)
+		}
+		path := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name)
+		if e := a.get(ctx, path, &r); e != nil {
 			return e
 		}
 		if !r.Private || !strings.EqualFold(r.FullName, repo) {
