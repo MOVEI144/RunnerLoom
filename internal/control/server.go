@@ -197,6 +197,12 @@ func (s *Server) Handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		// Only authenticated, authorized image streams receive the Agent's
+		// longer transfer budget. JSON responses retain the short deadline.
+		if e = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(core.ImageTransferTimeout)); e != nil {
+			failure(w, 500, e)
+			return
+		}
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("ETag", "\"sha256:"+digest+"\"")
 		http.ServeContent(w, r, st.Name(), st.ModTime(), f)
@@ -250,12 +256,13 @@ func (s *Server) Serve(ctx context.Context, listen, advertise string) error {
 	if e != nil {
 		return e
 	}
-	ln, e := net.Listen("tcp", listen)
+	var lc net.ListenConfig
+	ln, e := lc.Listen(ctx, "tcp", listen)
 	if e != nil {
 		return e
 	}
 	defer ln.Close()
-	server := &http.Server{Handler: s.Handler(), TLSConfig: cfg, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 5 * time.Minute, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
+	server := &http.Server{Handler: s.Handler(), TLSConfig: cfg, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384}
 	done := make(chan struct{})
 	defer close(done)
 	go func() {

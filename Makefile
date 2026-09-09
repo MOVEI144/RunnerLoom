@@ -1,4 +1,5 @@
 GO ?= go
+PYTHON ?= python3.12
 .PHONY: build test check package clean
 build:
 	mkdir -p dist
@@ -9,10 +10,10 @@ check:
 	test -z "$$(gofmt -l cmd internal)"
 	$(GO) vet ./...
 	$(GO) test -race -count=1 ./...
-	bash -n internal/cli/image-build.sh scripts/ci-vm-smoke.sh scripts/ci-free-space.sh
+	for s in internal/cli/image-build.sh scripts/ci-vm-smoke.sh scripts/ci-free-space.sh; do bash -n "$$s" || exit 1; done
 package:
 	$(GO) mod vendor
-	GO=$(GO) python3 scripts/package.py --deb
-	python3 scripts/test_package.py dist
+	GO=$(GO) $(PYTHON) scripts/package.py --deb
+	$(PYTHON) scripts/test_package.py dist
 clean:
 	rm -rf -- dist

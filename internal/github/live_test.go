@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,9 @@ func TestLiveGitHubScaleSet(t *testing.T) {
 	origin := os.Getenv("RUNNERLOOM_LIVE_GITHUB_URL")
 	if tokenFile == "" || origin == "" {
 		t.Skip("explicit live GitHub credentials not provided")
+	}
+	if !validLiveOrigin(origin) {
+		t.Fatal("live GitHub URL must use HTTPS without userinfo, query or fragment")
 	}
 	b, e := core.ReadSecret(tokenFile)
 	if e != nil {
@@ -93,4 +97,20 @@ func TestLiveGitHubScaleSet(t *testing.T) {
 		}
 	}
 	t.Log("LIVE: scale-set, listener, JIT, identity lookup and runner removal verified; no token or JIT printed")
+}
+
+func validLiveOrigin(origin string) bool {
+	u, err := url.Parse(origin)
+	return err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && u.RawQuery == "" && u.Fragment == ""
+}
+
+func TestLiveOriginRequiresHTTPS(t *testing.T) {
+	for _, origin := range []string{"http://github.com/org", "ftp://github.com/org", "https://", "https://token@github.com/org", "https://github.com/org?x=y", "https://github.com/org#fragment"} {
+		if validLiveOrigin(origin) {
+			t.Fatalf("insecure live origin accepted: %q", origin)
+		}
+	}
+	if !validLiveOrigin("https://github.com/organization") {
+		t.Fatal("valid live origin refused")
+	}
 }

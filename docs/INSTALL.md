@@ -64,5 +64,9 @@ Do not remove libvirt's shared `default` network or other applications' firewall
 
 Before connecting valuable repository secrets, verify on your own host: CPU/RAM/disk limits, dedicated
 reservations, LAN and inter-VM isolation, reboot recovery and a real job through your authorized GitHub App.
+Also require dedicated Organization authorization (an explicitly authorized App/PAT and a restricted
+Runner Group for the intended private repositories), and successful Golden Image build/boot qualification
+with a verified, unregistered official Runner. This checklist is incomplete until both gates pass;
+missing credentials, skipped tests and fixture-only runtime tests do not satisfy these acceptance gates.
 GitHub-hosted CI evidence does not establish isolation on an arbitrary host with existing VPN/firewall rules.
 GPU, hostile public PRs, Controller HA and a privilege-separated host helper are not certified by this release.

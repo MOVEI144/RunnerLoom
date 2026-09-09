@@ -1,7 +1,10 @@
 # Contributing
 
 Use the Go version declared by the repository. Run `make check` before opening
-a pull request. Preserve exact dependency versions and commit `go.sum` changes.
+a pull request. Packaging requires Python 3.12 or newer (`python3.12` by default;
+override `PYTHON` for `make package`). The pinned Ubuntu 24.04 CI image provides
+Python 3.12, which the packaging and release steps invoke explicitly.
+Preserve exact dependency versions and commit `go.sum` changes.
 New resource mutations need restart/replay tests, capacity changes need
 concurrent tests, and destructive host operations need ownership-negative tests.
 

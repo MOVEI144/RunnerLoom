@@ -116,9 +116,11 @@ if [[ "$BUILD_STATUS" != 0 ]] || ! grep -q '^RUNNERLOOM_GOLDEN_BUILD_COMPLETE' "
   exit 1
 fi
 tail -n 40 "$WORK/build.log" >&2
+# virt-customize --run evaluates this body with /bin/sh, ignoring a bash
+# shebang. Keep the offline cleanup POSIX-compatible; the build VM uses bash.
 cat > "$WORK/clean.sh" <<'CLEAN'
-#!/bin/bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 rm -f /usr/local/sbin/runnerloom-image-build /etc/apt/apt.conf.d/90runnerloom-builder /etc/ssh/ssh_host_*
 cloud-init clean --logs --machine-id
 : >/etc/machine-id

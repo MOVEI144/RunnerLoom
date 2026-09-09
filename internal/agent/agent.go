@@ -368,7 +368,7 @@ func (a *Agent) download(ctx context.Context, im core.Image) error {
 	}
 	// Separate client for bounded streaming; credential/TLS/redirect policy retained.
 	httpClient := *a.Client.HTTP
-	httpClient.Timeout = 30 * time.Minute
+	httpClient.Timeout = core.ImageTransferTimeout
 	r, e := http.NewRequestWithContext(ctx, http.MethodGet, a.Config.Controller+"/v1/images/"+strings.TrimPrefix(im.Digest, "sha256:"), nil)
 	if e != nil {
 		return e
