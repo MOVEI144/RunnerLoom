@@ -2,13 +2,7 @@ name: RunnerLoom runtime qualification (not live GitHub)
 
 on:
   push:
-    branches: [test/runnerloom-e2e-20260909]
-    paths:
-      - '.github/workflows/e2e-qualification.yml'
-      - 'internal/e2e/**'
-      - 'internal/cli/image-build.sh'
-      - 'internal/cli/image_shell_test.go'
-      - 'scripts/e2e/**'
+    branches: [main, test/runnerloom-e2e-20260909]
   workflow_dispatch:
 
 permissions:

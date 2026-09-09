@@ -35,11 +35,13 @@ jobs:
         run: go test ./internal/core -run '^$' -fuzz '^FuzzDecode$' -fuzztime=5s
       - name: Fuzz reservation invariants
         run: go test ./internal/core -run '^$' -fuzz '^FuzzReservationProtection$' -fuzztime=5s
+      - name: Require the Python 3.12 runtime provided by the Ubuntu 24.04 image
+        run: python3.12 -c 'import sys; assert sys.version_info[:2] == (3, 12)'
       - name: Build and verify release packages
         run: |
           go mod vendor
-          python3 scripts/package.py --deb
-          python3 scripts/test_package.py dist
+          python3.12 scripts/package.py --deb
+          python3.12 scripts/test_package.py dist
           git diff --exit-code -- go.mod go.sum
       - name: Scan shipped binary for known reachable vulnerabilities
         shell: bash
@@ -129,7 +131,6 @@ jobs:
         env:
           RUNNERLOOM_SMOKE_IMAGE: /var/lib/runnerloom-ci-build/runner.qcow2
         run: |
-          sudo chmod 0644 "$RUNNERLOOM_SMOKE_IMAGE"
           bash scripts/ci-vm-smoke.sh
           grep -q RUNNERLOOM_GITHUB_RUNNER_PRESENT "$RUNNER_TEMP/runnerloom-evidence/vm-smoke.json"
       - name: Preserve image manifest and execution evidence
