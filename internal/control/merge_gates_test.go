@@ -36,7 +36,7 @@ func TestAuthorizedImagesUseSharedTransferDeadline(t *testing.T) {
 	handler := control.New(l.s, l.ca, l.c.Name).Handler()
 	for _, kind := range []string{"authorized", "unauthenticated", "deadline-error"} {
 		t.Run(kind, func(t *testing.T) {
-			req := httptest.NewRequest("GET", "https://controller/v1/images/"+strings.TrimPrefix(l.c.Images[0].Digest, "sha256:"), nil)
+			req := httptest.NewRequestWithContext(t.Context(), "GET", "https://controller/v1/images/"+strings.TrimPrefix(l.c.Images[0].Digest, "sha256:"), nil)
 			if kind != "unauthenticated" {
 				req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}, VerifiedChains: [][]*x509.Certificate{{leaf}}}
 			}

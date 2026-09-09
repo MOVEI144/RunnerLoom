@@ -28,7 +28,7 @@ func SuggestSubnet(ctx context.Context, executor Executor) (string, error) {
 		}
 		p, e := routePrefix(r.Dst)
 		if e != nil {
-			return "", errors.New("cannot safely interpret a host route")
+			return "", fmt.Errorf("cannot safely interpret host route %q: %w", r.Dst, e)
 		}
 		prefixes = append(prefixes, p)
 	}

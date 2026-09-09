@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,6 +35,17 @@ func TestScaleSetHTTPPolicyFreshAndBounded(t *testing.T) {
 	}
 	if a.RetryMax != 4 || a.RetryWaitMax != 30*time.Second {
 		t.Fatal("SDK retry limits changed")
+	}
+	if a.CheckRetry == nil {
+		t.Fatal("redirect retry policy is missing")
+	}
+	retry, err := a.CheckRetry(context.Background(), nil, &url.Error{
+		Op:  "Get",
+		URL: "https://api.github.com/redirect",
+		Err: errGitHubRedirect,
+	})
+	if retry || !errors.Is(err, errGitHubRedirect) {
+		t.Fatalf("rejected redirect was retried: retry=%t err=%v", retry, err)
 	}
 }
 

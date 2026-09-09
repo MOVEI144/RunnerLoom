@@ -1,6 +1,7 @@
 package github
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"time"
@@ -26,5 +27,11 @@ func newScaleSetHTTPClient() *retryablehttp.Client {
 	c.RetryMax = 4
 	c.RetryWaitMax = 30 * time.Second
 	c.HTTPClient.CheckRedirect = rejectGitHubRedirect
+	c.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		if errors.Is(err, errGitHubRedirect) {
+			return false, err
+		}
+		return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+	}
 	return c
 }

@@ -3,6 +3,7 @@ package host
 import (
 	"context"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -16,6 +17,15 @@ func TestSubnetSuggestionChecksRoutesWithoutModifyingHost(t *testing.T) {
 		t.Fatal("suggestion modified host", f.Commands)
 	}
 }
+
+func TestSubnetSuggestionReportsMalformedRoute(t *testing.T) {
+	f := &fakeHost{Routes: `[{"dst":"not-a-route"}]`}
+	_, err := SuggestSubnet(t.Context(), f)
+	if err == nil || !strings.Contains(err.Error(), `host route "not-a-route"`) {
+		t.Fatalf("malformed route was not identified: %v", err)
+	}
+}
+
 func TestSubnetSuggestionFailsClosedOnExhaustion(t *testing.T) {
 	_, e := availableSubnet([]netip.Prefix{netip.MustParsePrefix("172.16.0.0/12"), netip.MustParsePrefix("10.0.0.0/8")})
 	if e == nil {
