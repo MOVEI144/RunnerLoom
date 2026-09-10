@@ -63,6 +63,23 @@ jobs:
           path: coverage.out
           retention-days: 14
           if-no-files-found: error
+  macos-tests:
+    name: macOS repository tests
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Verify direct repository-wide test command on macOS
+        run: |
+          test -z "$(gofmt -l cmd internal)"
+          go vet ./...
+          go test -count=1 ./...
   real-vm:
     name: Real Ubuntu VM lifecycle
     needs: checks
@@ -102,7 +119,7 @@ jobs:
     needs: checks
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -127,6 +144,18 @@ jobs:
           sudo ./dist/runnerloom image build --out /var/lib/runnerloom-ci-build/runner.qcow2 --json 2>&1 | tee "$RUNNER_TEMP/runnerloom-image-build.log"
           sudo cp /var/lib/runnerloom-ci-build/runner.qcow2.manifest.json "$RUNNER_TEMP/runner-image.manifest.json"
           sudo chown "$(id -u):$(id -g)" "$RUNNER_TEMP/runner-image.manifest.json"
+      - name: Verify minimized service policy and collect boot/image metrics
+        run: |
+          sudo bash scripts/ci-golden-image-policy.sh /var/lib/runnerloom-ci-build/runner.qcow2 "$RUNNER_TEMP/runnerloom-image-policy-evidence"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/runnerloom-image-policy-evidence"
+          python3 - <<'PY'
+          import json,os,pathlib
+          manifest=json.loads(pathlib.Path(os.environ['RUNNER_TEMP'],'runner-image.manifest.json').read_text())
+          evidence=json.loads(pathlib.Path(os.environ['RUNNER_TEMP'],'runnerloom-image-policy-evidence','summary.json').read_text())
+          assert manifest['imagePolicy']['schemaVersion']=='runnerloom/image-policy/v1'
+          assert manifest['imagePolicy']==evidence['policy']
+          assert evidence['qualified'] is True
+          PY
       - name: Boot the produced image, verify Runner binary and destroy VM
         env:
           RUNNERLOOM_SMOKE_IMAGE: /var/lib/runnerloom-ci-build/runner.qcow2
@@ -141,6 +170,7 @@ jobs:
           path: |
             ${{ runner.temp }}/runner-image.manifest.json
             ${{ runner.temp }}/runnerloom-image-build.log
+            ${{ runner.temp }}/runnerloom-image-policy-evidence/
             ${{ runner.temp }}/runnerloom-evidence/
           retention-days: 14
           if-no-files-found: warn

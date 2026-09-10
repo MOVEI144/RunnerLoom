@@ -2,6 +2,7 @@ package cli
 
 import (
 	_ "embed"
+	"time"
 
 	"github.com/MOVEI144/RunnerLoom/internal/core"
 	"github.com/MOVEI144/RunnerLoom/internal/host"
@@ -48,4 +49,38 @@ func (a *App) addMaintenance(root *cobra.Command) {
 		}
 		return a.output(checks)
 	}
+
+	maintenance := &cobra.Command{Use: "maintenance", Short: "Controller履歴の安全な点検・圧縮"}
+	root.AddCommand(maintenance)
+	var olderThan time.Duration
+	var keepAudit int64
+	var apply bool
+	compact := add(maintenance, "compact", "期限切れの一時記録だけを整理。既定はdry-run", 0, func(c *cobra.Command, _ []string) error {
+		policy := core.MaintenancePolicy{
+			Before:           time.Now().UTC().Add(-olderThan),
+			MinimumAuditRows: keepAudit,
+		}
+		var lock *core.Lock
+		if apply {
+			var e error
+			lock, e = core.AcquireLock(a.State, "controller")
+			if e != nil {
+				return core.Fail("CONTROLLER_RUNNING", "圧縮前にControllerサービスを停止してください", nil)
+			}
+			defer lock.Close()
+		}
+		s, e := a.store()
+		if e != nil {
+			return e
+		}
+		defer s.Close()
+		report, e := s.Maintain(c.Context(), policy, apply)
+		if e != nil {
+			return e
+		}
+		return a.output(report)
+	})
+	compact.Flags().DurationVar(&olderThan, "older-than", 30*24*time.Hour, "この期間より古い安全な一時記録を候補にする（24時間以上）")
+	compact.Flags().Int64Var(&keepAudit, "keep-audit", 1000, "期間に関係なく残す最新監査行の最低数")
+	compact.Flags().BoolVar(&apply, "apply", false, "dry-run結果を確認後に実際の削除・WAL checkpoint・VACUUMを行う")
 }
