@@ -9,7 +9,8 @@
 ```bash
 export RL_CONTROLLER_STATE="/var/lib/runnerloom/controller"
 export RL_NODE_NAME="node-a"
-export RL_NODE_CONFIG="/var/lib/runnerloom/node-a/agent.json"
+export RL_NODE_STATE="/var/lib/runnerloom/node-a"
+export RL_NODE_CONFIG="$RL_NODE_STATE/agent.json"
 ```
 
 ## 日常の状態確認
@@ -115,7 +116,7 @@ home-linux-lite-v2  →  smoke test → production workflow
 
 ## Backup
 
-Controllerを止めた状態で一貫したbackupを取ります。
+Controllerを止めた状態で一貫したbackupを取ります。`backup --out`は既存ファイルを上書きしないため、実行ごとに新しい名前を使います。
 
 ```bash
 sudo runnerloom node drain "$RL_NODE_NAME" \
@@ -125,9 +126,11 @@ sudo systemctl stop "runnerloom-agent-$RL_NODE_NAME.service"
 sudo systemctl stop runnerloom-controller.service
 
 sudo install -d -m 0700 /var/backups/runnerloom
+backup="/var/backups/runnerloom/controller-$(date -u +%Y%m%dT%H%M%SZ).db"
 sudo runnerloom backup \
   --state "$RL_CONTROLLER_STATE" \
-  --out /var/backups/runnerloom/controller.db
+  --out "$backup"
+printf 'saved: %s\n' "$backup"
 ```
 
 `backup`が保存するのはSQLite snapshotです。完全な復旧には次も必要です。
@@ -213,9 +216,10 @@ sudo systemctl start "runnerloom-agent-$RL_NODE_NAME.service"
 
 binary path、Controller listen/advertise URL、LAN discovery設定を変更した場合は、同じ`service install`を再実行してRunnerLoom所有unitを更新します。
 
-Controller:
+Controllerの再生成中は同じstateを使う常駐processを止めます。起動中のままだとprocess lockにより拒否されます。
 
 ```bash
+sudo systemctl stop runnerloom-controller.service
 sudo runnerloom service install \
   --role controller \
   --state "$RL_CONTROLLER_STATE" \
@@ -225,12 +229,13 @@ sudo runnerloom service install \
   --start
 ```
 
-Agent:
+Agent unitのcommandを確実に更新するため、既存Agentも先に止めます。
 
 ```bash
+sudo systemctl stop "runnerloom-agent-$RL_NODE_NAME.service"
 sudo runnerloom service install \
   --role agent \
-  --state "$RL_CONTROLLER_STATE" \
+  --state "$RL_NODE_STATE" \
   --config "$RL_NODE_CONFIG" \
   --binary "$(command -v runnerloom)" \
   --start
