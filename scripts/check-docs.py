@@ -26,6 +26,25 @@ def fail(message: str, errors: list[str]) -> None:
     errors.append(message)
 
 
+def prose_without_fences(lines: list[str], relative: Path, errors: list[str]) -> str:
+    prose: list[str] = []
+    fence: str | None = None
+    for line in lines:
+        stripped = line.lstrip()
+        marker = next((candidate for candidate in ("```", "~~~") if stripped.startswith(candidate)), None)
+        if marker is not None:
+            if fence is None:
+                fence = marker
+            elif marker == fence:
+                fence = None
+            continue
+        if fence is None:
+            prose.append(line)
+    if fence is not None:
+        fail(f"{relative}: unbalanced fenced code block", errors)
+    return "\n".join(prose)
+
+
 def local_target(source: Path, raw: str) -> Path | None:
     target = raw.strip()
     if target.startswith("<") and target.endswith(">"):
@@ -49,16 +68,15 @@ def validate_document(path: Path, errors: list[str]) -> str:
         return ""
 
     relative = path.relative_to(ROOT)
-    lines = text.splitlines()
+    prose = prose_without_fences(text.splitlines(), relative, errors)
+    lines = prose.splitlines()
     first = next((line for line in lines if line.strip()), "")
     if not first.startswith("# "):
-        fail(f"{relative}: first non-empty line must be one H1 heading", errors)
+        fail(f"{relative}: first non-empty prose line must be one H1 heading", errors)
     if sum(line.startswith("# ") for line in lines) != 1:
-        fail(f"{relative}: expected exactly one H1 heading", errors)
-    if sum(line.startswith("```") for line in lines) % 2:
-        fail(f"{relative}: unbalanced fenced code block", errors)
+        fail(f"{relative}: expected exactly one H1 heading outside code fences", errors)
 
-    for match in LINK.finditer(text):
+    for match in LINK.finditer(prose):
         target = local_target(path, match.group(1))
         if target is None:
             continue
