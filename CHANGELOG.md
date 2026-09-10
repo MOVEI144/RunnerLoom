@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.1.0-rc.2
+
+Second Linux/amd64 CPU/LAN release candidate, focused on portability, Golden Image hardening and qualification evidence.
+
+- Make the documented repository-wide Go tests pass on macOS without weakening production private-path symlink checks.
+- Minimize unnecessary services in ephemeral Golden Images and boot the finished image to verify every required mask.
+- Verify retained image capabilities including networking, CA trust, Git, Python, build tools, jq, sudo and the official Actions Runner.
+- Add reusable live acceptance lanes for concurrent standard runners, large runners, artifact evidence and external cancellation.
+- Add dry-run-first Controller maintenance/SQLite compaction while preserving instance ownership and SDK replay evidence.
+- Report maintenance as applied once its deletion transaction commits, even if later checkpoint or VACUUM work fails.
+- Preserve qualification artifacts on failed acceptance runs for diagnosis.
+- Keep deployment-only v1 gates explicit: two physical LAN Nodes, restricted privileged-helper qualification, storage-pressure campaigns, complete backup/restore fencing and expanded isolation remain separate evidence requirements.
+
+See `docs/VERIFICATION.md` and `docs/V1_ACCEPTANCE.md` for the qualification boundary.
+
 ## 0.1.0-rc.1
 
 First Linux/amd64 CPU/LAN release candidate. This is not a GPU or high-availability release.
