@@ -1,6 +1,10 @@
 package core
 
 import (
+	"database/sql"
+	"errors"
+	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -79,6 +83,65 @@ func TestMaintenanceDryRunAndApplyPreserveReplayEvidence(t *testing.T) {
 		if got != want {
 			t.Fatalf("%s: got %d want %d", query, got, want)
 		}
+	}
+}
+
+func TestMaintenanceReportsCommittedDeletionWhenCheckpointBusy(t *testing.T) {
+	s, _ := testStore(t)
+	now := time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC)
+	s.Now = func() time.Time { return now }
+	old := now.Add(-90 * 24 * time.Hour).Unix()
+	if _, err := s.DB.Exec("INSERT INTO plans(id,base,expires,payload) VALUES('old-plan',0,?,X'7B7D')", old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec("PRAGMA busy_timeout=100"); err != nil {
+		t.Fatal(err)
+	}
+
+	u := url.URL{Scheme: "file", Path: filepath.Join(s.Dir, "controller.db")}
+	q := u.Query()
+	q.Add("_pragma", "busy_timeout(100)")
+	u.RawQuery = q.Encode()
+	blocker, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	reader, err := blocker.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Rollback()
+	var snapshot int
+	if err = reader.QueryRowContext(ctx, "SELECT COUNT(*) FROM plans").Scan(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := s.Maintain(ctx, MaintenancePolicy{Before: now.Add(-30 * 24 * time.Hour), MinimumAuditRows: 1}, true)
+	if err == nil {
+		t.Fatal("checkpoint unexpectedly succeeded while a prior snapshot was open")
+	}
+	if !report.Applied || report.WALCheckpointComplete || report.VacuumComplete {
+		t.Fatalf("committed deletion was reported incorrectly: %+v", report)
+	}
+	var fault *Error
+	if !errors.As(err, &fault) || fault.Code != "MAINTENANCE_BUSY" {
+		t.Fatalf("unexpected maintenance failure: %T %v", err, err)
+	}
+	details, ok := fault.Details.(map[string]any)
+	if !ok {
+		t.Fatalf("partial report missing from structured error: %#v", fault.Details)
+	}
+	partial, ok := details["report"].(MaintenanceReport)
+	if !ok || !partial.Applied || partial.WALCheckpointComplete {
+		t.Fatalf("structured error has wrong partial report: %#v", details)
+	}
+	var remaining int
+	if err = s.DB.QueryRow("SELECT COUNT(*) FROM plans WHERE id='old-plan'").Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatal("deletion was not persisted before the checkpoint failure")
 	}
 }
 
