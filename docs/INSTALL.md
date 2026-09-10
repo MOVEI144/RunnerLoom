@@ -1,27 +1,31 @@
-# Install, verify, upgrade and remove
+# Installation & Upgrades
 
-## Supported package
+This guide covers installing, verifying, upgrading, and removing RunnerLoom.
 
-RunnerLoom 0.1.0-rc.1 targets Ubuntu 24.04, Linux/amd64 and CPU-only KVM guests.
-A release candidate is usable software awaiting deployment acceptance, not a claim that every part of the broader design is production-qualified.
-The archive/deb installs the CLI. Virtualization tools, GitHub authorization and an explicit setup are separate.
-Do not run a downloaded installation script directly from a pipe.
+## Supported Environment
 
-## Verify before installing
+RunnerLoom targets **Ubuntu 24.04**, Linux/amd64, and CPU-only KVM guests.
 
-Download the archive (or Debian package) and `SHA256SUMS` from the **same release**.
-Run this in the directory containing those files:
+> **Note**: As a Release Candidate, it is highly functional but may not have complete production qualification across all potential host environments. The `.tar.gz` and `.deb` packages install only the CLI. Virtualization tools, GitHub authorization, and configuration are performed in separate, explicit steps.
+
+## Verify Before Installing
+
+Always verify the downloaded archive (or Debian package) and `SHA256SUMS` from the **same release**.
+
+Run the following command in the directory containing the downloaded files:
 
 ```bash
-# When only selected assets were downloaded, --ignore-missing ignores other listed assets.
+# --ignore-missing allows the check to pass if you only downloaded specific assets
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
-Require an `OK` result for the asset you are about to use. Checksums detect corruption and mismatched assets;
-they do not protect against compromise of the release publisher itself. `BUILDINFO.json` records the exact
-source commit, compiler, target and dependency versions. Third-party license notices are included.
+Ensure you receive an `OK` result for the asset you plan to use. Checksums detect file corruption and mismatched assets. `BUILDINFO.json` records the exact source commit, compiler, target, and dependency versions.
 
-Archive installation (replace the version only with the release actually downloaded):
+## Installation
+
+### Method 1: Using the `.tar.gz` Archive (Recommended)
+
+*Replace the version number below with the actual release you downloaded.*
 
 ```bash
 tar -xzf runnerloom-0.1.0-rc.1-linux-amd64.tar.gz
@@ -30,43 +34,60 @@ cd runnerloom-0.1.0-rc.1-linux-amd64
 sudo install -m 0755 runnerloom /usr/local/bin/runnerloom
 ```
 
-Alternatively, `sudo apt install ./runnerloom_0.1.0~rc.1_amd64.deb` installs `/usr/bin/runnerloom`.
-Use one installation method, not both: `/usr/local/bin` normally takes precedence over `/usr/bin`.
-The Debian package has no maintainer scripts and **does not enable a service or change a firewall**.
-Its virtualization dependencies are suggestions, not automatically enabled daemons.
+### Method 2: Using the `.deb` Package
 
-Follow [the Japanese setup guide](QUICKSTART.ja.md) for the host packages, image creation, GitHub App,
-Pool configuration, VM-network plan and explicit service installation.
-`runnerloom --help --json` is a machine-readable command reference; `config schema` emits JSON Schema.
+```bash
+sudo apt install ./runnerloom_0.1.0~rc.1_amd64.deb
+```
 
-## Before an upgrade
+> **Important**: Use only one installation method. (`/usr/local/bin` normally takes precedence over `/usr/bin`). The Debian package **does not** automatically enable a service or change your firewall rules.
 
-1. Stop new assignments with `node drain` and wait for held resources to reach zero.
-2. Stop the Controller and Agent services. Verify no management process remains.
-3. Run `backup --out /absolute/private/path/controller.db` and separately preserve the Controller's
-   master key, CA keys/certificate, bindings and dedicated GitHub credential references. Preserve each
-   node's identity and configuration too. A DB-only backup is **not** a complete recovery backup.
-4. Verify and install the new package, read its migration notes, then start the Controller and agents.
-5. Check `status`, `doctor --strict`, `pool explain`, and a disposable test job before resuming nodes.
+### Next Steps After Installation
 
-Do not restore a DB snapshot alongside live agents without reconciling their actual VMs. Do not run old
-and restored Controllers simultaneously. Downgrade is allowed only if the target version explicitly supports
-the current schema; otherwise restore a consistent offline backup after fencing the old Controller.
+Follow the [Japanese Quickstart Guide (日本語セットアップガイド)](QUICKSTART.ja.md) for step-by-step instructions on host packages, image creation, GitHub App setup, pool configuration, network planning, and service installation.
 
-## Remove without deleting data
+- Use `runnerloom --help --json` for a machine-readable command reference.
+- Use `runnerloom config schema` to generate a JSON Schema.
 
-Drain and finish jobs, stop/disable only the generated RunnerLoom services, then remove the package or
-manually installed binary. Preserve state and image directories until you have verified all VM/domain
-cleanup and backed up data. Package removal intentionally does not recursively erase these directories.
-Do not remove libvirt's shared `default` network or other applications' firewall rules.
+## Upgrading
 
-## Deployment acceptance
+Follow these steps to safely upgrade an existing RunnerLoom cluster:
 
-Before connecting valuable repository secrets, verify on your own host: CPU/RAM/disk limits, dedicated
-reservations, LAN and inter-VM isolation, reboot recovery and a real job through your authorized GitHub App.
-Also require dedicated Organization authorization (an explicitly authorized App/PAT and a restricted
-Runner Group for the intended private repositories), and successful Golden Image build/boot qualification
-with a verified, unregistered official Runner. This checklist is incomplete until both gates pass;
-missing credentials, skipped tests and fixture-only runtime tests do not satisfy these acceptance gates.
-GitHub-hosted CI evidence does not establish isolation on an arbitrary host with existing VPN/firewall rules.
-GPU, hostile public PRs, Controller HA and a privilege-separated host helper are not certified by this release.
+1. **Drain Nodes**: Stop new assignments using `runnerloom node drain` and wait for all held resources to reach zero.
+2. **Stop Services**: Stop both the Controller and Agent services. Ensure no management processes remain running.
+3. **Backup Everything**:
+   - Run `runnerloom backup --out /absolute/private/path/controller.db`.
+   - **Crucial**: Separately back up the Controller's master key, CA keys/certificates, bindings, and GitHub credential references.
+   - Preserve each node's identity and configuration.
+   - *Note: A DB-only backup is NOT a complete recovery backup.*
+4. **Install Update**: Verify and install the new package (reading any migration notes first).
+5. **Restart Services**: Start the Controller and agents.
+6. **Verify**: Check `runnerloom status`, `runnerloom doctor --strict`, `runnerloom pool explain`, and run a test job before resuming nodes.
+
+> **Warning**: Do not restore a DB snapshot alongside live agents without reconciling their actual VMs. Do not run old and restored Controllers simultaneously.
+
+## Removing RunnerLoom
+
+To cleanly remove RunnerLoom without deleting your data:
+
+1. Drain and wait for all active jobs to finish.
+2. Stop and disable the generated RunnerLoom systemd services.
+3. Remove the `.deb` package or the binary in `/usr/local/bin`.
+
+> **Note**: Removing the package intentionally **does not** erase your state or image directories. Please preserve these directories until you have verified all VM/domain cleanup and backed up any necessary data. Do not remove libvirt's shared `default` network or other applications' firewall rules.
+
+## Deployment Acceptance
+
+Before connecting valuable repositories, verify the following on your host:
+
+- CPU/RAM/disk limits are enforced.
+- Dedicated reservations function correctly.
+- LAN and inter-VM isolation are working.
+- The system recovers gracefully after a reboot.
+- A real job runs successfully using your authorized GitHub App.
+
+**Requirements for Production**:
+- Explicit Organization authorization (via App/PAT and restricted Runner Groups).
+- Successful Golden Image build and boot qualification with a verified, unregistered official Runner.
+
+*This checklist must be passed; missing credentials or skipping tests do not satisfy these acceptance gates.*
