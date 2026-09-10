@@ -104,7 +104,7 @@ sudo find /var/lib/runnerloom/controller -maxdepth 2 -printf '%M %u:%g %p\n'
 sudo find /var/lib/runnerloom/node-a -maxdepth 2 -printf '%M %u:%g %p\n'
 ```
 
-private keyやcredential fileを`chmod 644`で回避しないでください。Controller serviceのinstallは、Controller state treeを専用`runnerloom-controller`ユーザーへ安全にchownします。再生成前に同じstateを使うControllerを止めます。
+private keyやcredential fileを`chmod 644`で回避しないでください。Controller serviceのinstallは、Controller state treeを専用`runnerloom-controller`ユーザーへ安全にchownします。再生成前に同じstateを使うControllerを止めます。次のURLは1台構成の例なので、複数Node構成では実際のlisten/advertise値へ置き換えてください。
 
 ```bash
 sudo systemctl stop runnerloom-controller.service
@@ -112,6 +112,8 @@ sudo runnerloom service install \
   --role controller \
   --state /var/lib/runnerloom/controller \
   --binary "$(command -v runnerloom)" \
+  --listen 127.0.0.1:8443 \
+  --advertise https://127.0.0.1:8443 \
   --start
 ```
 
