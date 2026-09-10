@@ -13,9 +13,14 @@ concurrency:
 
 jobs:
   standard:
-    name: Live ephemeral standard runner
+    name: Live standard runner ${{ matrix.slot }}
     runs-on: r5gh-linux-standard
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        slot: [1, 2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -54,11 +59,55 @@ jobs:
           curl --fail --silent --show-error --retry 2 --connect-timeout 10 \
             https://api.github.com/meta -o acceptance-evidence/github-meta.json
           test -s acceptance-evidence/github-meta.json
+          sleep 20
 
       - name: Upload acceptance evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: r5ghserver-acceptance-${{ github.run_id }}
+          name: r5ghserver-standard-${{ matrix.slot }}-${{ github.run_id }}
+          path: acceptance-evidence/
+          retention-days: 14
+          if-no-files-found: error
+
+  large:
+    name: Live large runner
+    needs: standard
+    runs-on: r5gh-linux-large
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Verify large-pool resources and workload
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p acceptance-evidence
+          cpus=$(nproc)
+          memory_kib=$(awk '/MemTotal/ {print $2}' /proc/meminfo)
+          test "$cpus" -eq 8
+          test "$memory_kib" -ge 15000000
+          {
+            printf 'runner_name=%s\n' "$RUNNER_NAME"
+            printf 'runner_os=%s\n' "$RUNNER_OS"
+            printf 'runner_arch=%s\n' "$RUNNER_ARCH"
+            printf 'virtualization=%s\n' "$(systemd-detect-virt || true)"
+            printf 'cpus=%s\n' "$cpus"
+            printf 'memory_kib=%s\n' "$memory_kib"
+            df -B1 / | awk 'NR == 2 {print "root_bytes=" $2; print "root_available_bytes=" $4}'
+          } | tee acceptance-evidence/environment.txt
+          dd if=/dev/zero of=acceptance-evidence/disk.bin bs=1M count=128 conv=fsync status=none
+          sha256sum acceptance-evidence/disk.bin > acceptance-evidence/disk.sha256
+          rm acceptance-evidence/disk.bin
+          curl --fail --silent --show-error --retry 2 --connect-timeout 10 \
+            https://api.github.com/meta -o acceptance-evidence/github-meta.json
+          test -s acceptance-evidence/github-meta.json
+
+      - name: Upload large-pool evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: r5ghserver-large-${{ github.run_id }}
           path: acceptance-evidence/
           retention-days: 14
           if-no-files-found: error
