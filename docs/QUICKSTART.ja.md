@@ -1,14 +1,22 @@
-# RunnerLoomを1台から使う
+# RunnerLoom クイックスタートガイド
 
-RunnerLoomは「GitHubが受け付けた仕事に合わせて、自分のPC上に使い捨てVMを作る」ソフトです。仕事はVM内で実行され、終了後はVMと作業ディスクを削除します。NodeへのSSH公開や、インターネットへのポート転送は不要です。複数台構成では、NodeからControllerのLAN用HTTPSポートへ到達できる必要があります。
+RunnerLoom は、GitHub Actions のジョブ要求に応じて、あなた自身のマシン上に使い捨ての Ubuntu VM（仮想マシン）をプロビジョニングするソフトウェアです。ジョブは隔離された VM 内で実行され、完了後に VM とその作業ディスクは自動的に削除されます。
 
-まずは非公開Repositoryと、CPU用のUbuntu VMで始めてください。GPUの割り当て、Windows/macOSホスト、Controllerの自動二重化はこの版の対象外です。GitHub-hostedと同じソフトウェア全部入りのイメージではありません。
+外部へのポート開放（ポートフォワーディング）や SSH の公開は不要です。複数台構成の場合、各 Node（ワーカー）から Controller の LAN 用 HTTPS ポートに到達できれば動作します。
 
-配布物の入手・チェックサム検証・更新方法は [Install / upgrade](INSTALL.md) に記載しています。まず `runnerloom version --json` で版とソースコミットを確認してください。
+> **注記**: まずは非公開リポジトリ（Private Repository）と、CPU のみを割り当てる Ubuntu VM で始めることを推奨します。現在のバージョンでは、GPU パススルー、Windows/macOS ホスト、Controller の自動 HA（高可用性）構成はサポートされていません。
 
-## 1. 必要なもの
+配布物の入手・チェックサム検証・更新方法については、[Install / upgrade](INSTALL.md) を参照してください。まずは以下のコマンドでバージョンとソースコミットを確認します：
 
-ホストはUbuntu Server 24.04 x86_64を想定しています。BIOS/UEFIで仮想化支援を有効にしてください。CLIの配布バイナリを使う場合、Goのインストールは不要です。
+```bash
+runnerloom version --json
+```
+
+---
+
+## 1. 必要な環境の準備
+
+ホスト OS は **Ubuntu Server 24.04 x86_64** を想定しています。BIOS/UEFI で仮想化支援機能（VT-x/AMD-V）を有効にしてください。CLI の配布バイナリを使用する場合、Go のインストールは不要です。
 
 ```bash
 sudo apt-get update
@@ -19,19 +27,24 @@ sudo install -m 0755 runnerloom /usr/local/bin/runnerloom
 runnerloom doctor
 ```
 
-このapt操作はホストにソフトウェアとサービスを追加します。RunnerLoomが黙って実行する処理ではありません。既存の仮想化基盤との兼用は、先に設定と空き容量を確認してください。
+※ この `apt` 操作により、ホストに必要な仮想化パッケージがインストールされます。既存の仮想化環境と共存させる場合は、事前に設定とディスクの空き容量を確認してください。
 
-自分でビルドする場合はリポジトリのGo版に対応するツールチェーンで実行します。
+ソースからビルドする場合は、リポジトリの `go.mod` に指定されたバージョンの Go を使用してください：
 
 ```bash
 go build -trimpath -o runnerloom ./cmd/runnerloom
 ```
 
-## 2. GitHubの利用許可を用意する
+---
 
-OrganizationのSettingsから、利用するRunner Groupを作り、アクセスを **Selected repositories** にします。非公開の対象Repositoryだけを選び、公開Repositoryの許可を無効にしてください。設定ファイルの `allowedRepositories` は、GitHub側の一覧と一致させます。
+## 2. GitHub のアクセス許可設定
 
-認証には専用GitHub Appを推奨します。OrganizationのSelf-hosted runners管理権限を付け、そのOrganizationへインストールします。利用するAPIにはRepositoryのメタデータの読み取りも必要です。AppのClient ID、Installation ID、秘密鍵ファイルを用意してください。メンバー権限・プランで利用できるGroupの範囲はGitHub側の設定に従います。
+Organization の Settings から、利用する Runner Group を作成し、アクセス範囲を **Selected repositories** に設定します。対象となる非公開リポジトリのみを選択し、公開リポジトリの許可は無効にしてください。設定ファイルの `allowedRepositories` は、この GitHub 側のリストと一致させる必要があります。
+
+認証には、専用の **GitHub App** の使用を推奨します。
+1. Organization の `Self-hosted runners` 管理権限を付与し、Organization にインストールします。
+2. リポジトリのメタデータを読み取る API 権限も必要です。
+3. App の Client ID、Installation ID、秘密鍵（PEM）ファイルを用意してください。
 
 ```bash
 sudo install -d -m 0700 /var/lib/runnerloom/controller
@@ -40,7 +53,7 @@ sudo editor /var/lib/runnerloom/controller/github-credentials.json
 sudo chmod 0600 /var/lib/runnerloom/controller/github-credentials.json
 ```
 
-`github-credentials.json` の内容例（IDは実際の値に置換）：
+`github-credentials.json` の設定例（ID は実際の値に置き換えてください）：
 
 ```json
 {
@@ -50,11 +63,13 @@ sudo chmod 0600 /var/lib/runnerloom/controller/github-credentials.json
 }
 ```
 
-PATを使用する場合も、本文をCluster設定やCLI引数に書きません。専用の0600ファイルを `{"tokenFile":"/absolute/path/token"}` で参照します。APIに必要な最小権限だけを付け、普段使いの広い権限のトークンの使い回しは避けてください。
+※ PAT（Personal Access Token）を使用する場合も、CLI 引数や直接の設定ファイルへの書き込みは避け、`{"tokenFile":"/absolute/path/token"}` のように専用ファイルを参照させてください。最小権限の原則に従い、広範な権限を持つトークンの使い回しは避けてください。
 
-## 3. VMの元イメージを作る
+---
 
-イメージ作成だけに必要な道具を入れます。別のPCで作成し、完成したqcow2とmanifestを持ってきても構いません。
+## 3. ベースイメージのビルド
+
+VM のベースとなるイメージを作成します。別の PC で作成し、完成した `qcow2` と `manifest` をコピーしてきても構いません。
 
 ```bash
 sudo apt-get install -y libguestfs-tools
@@ -63,22 +78,21 @@ sudo runnerloom image build \
   --out /var/lib/runnerloom/builds/ubuntu-runner.qcow2
 ```
 
-このコマンドはCanonicalの署名を検証したUbuntu cloud imageと、SHA-256を検証した公式GitHub Runnerを使います。完成したイメージはまだGitHubに登録されておらず、App秘密鍵も含みません。`--runner-version 2.x.y` で版を固定できます。`latest`でも、実際に解決した版とハッシュをmanifestに記録します。
+このコマンドは、Canonical の署名を検証した Ubuntu クラウドイメージと、ハッシュ検証済みの公式 GitHub Runner を組み合わせてイメージを生成します。`--runner-version 2.x.y` でバージョンを固定することも可能です。
 
-次を確認してください。
+ビルドが完了したら、以下のファイルを確認してください：
+- `/var/lib/runnerloom/builds/ubuntu-runner.qcow2`
+- `/var/lib/runnerloom/builds/ubuntu-runner.qcow2.manifest.json`
 
-```text
-/var/lib/runnerloom/builds/ubuntu-runner.qcow2
-/var/lib/runnerloom/builds/ubuntu-runner.qcow2.manifest.json
-```
-
-manifestの `digest` を以降で使います。SHA-256を自分で計算することもできます。
+マニフェストファイル内の `digest`（SHA-256）は後ほど使用します。手動で確認する場合は以下のコマンドを実行します：
 
 ```bash
 sudo sha256sum /var/lib/runnerloom/builds/ubuntu-runner.qcow2
 ```
 
-## 4. PoolとPCの提供上限を決める
+---
+
+## 4. Pool とリソース上限の設定
 
 ```bash
 runnerloom config sample > cluster.json
@@ -86,24 +100,26 @@ editor cluster.json
 runnerloom config validate --file cluster.json
 ```
 
-主に次を変更します。
+主に以下の項目を編集します：
 
-| 項目 | 設定する内容 |
+| 設定項目 | 説明 |
 |---|---|
-| `github.url` | OrganizationのURL |
-| `github.runnerGroupID` | 選択したRunner Groupの数値ID |
-| `github.allowedRepositories` | Groupに許可した非公開Repository一覧 |
-| `images[].digest` | 作成したイメージの実際のSHA-256 |
-| `nodes[].budget` | このPCからVMへ提供する合計上限 |
-| `nodes[].localCeiling` | このPCの管理者として許可する上限 |
-| `pools[]` | VM1台のCPU・RAM・ディスク、最大台数 |
-| `reservations[]` | 特定Pool向けに取り置く台数 |
+| `github.url` | Organization の URL |
+| `github.runnerGroupID` | 選択した Runner Group の数値 ID |
+| `github.allowedRepositories` | Group に許可した非公開リポジトリのリスト |
+| `images[].digest` | ビルドしたイメージの実際の SHA-256 ダイジェスト |
+| `nodes[].budget` | この Node から VM に提供するリソースの合計上限 |
+| `nodes[].localCeiling` | この Node の管理者として許可するリソースの絶対上限 |
+| `pools[]` | VM 1台あたりの CPU・RAM・ディスクサイズと、最大同時実行数 |
+| `reservations[]` | 特定の Pool 向けにあらかじめ確保（予約）する台数 |
 
-サンプルのSHAがすべて0なのは、必ず実物へ置換するためです。架空の値のままではイメージ検証を通りません。サンプルのNode予算も自分のPCに合わせます。RAMはMiB、ディスクはGiBです。OS・管理プロセス用の余裕を残してください。
+※ サンプルの SHA-256 が `0` になっている箇所は、必ず実際の値に置き換えてください。RAM は MiB、ディスクは GiB 単位です。OS や管理プロセスが使用するリソースの余裕を残すように設定してください。
 
-専用枠が不要なら `reservations` を `[]` にして最初の設定を作れます。一度登録した要素をJSONから省略しても、後の適用時に暗黙削除はしません。
+---
 
-## 5. 1台兼用の設定を保存する
+## 5. Controller と Node の兼任設定の適用
+
+1台のマシンで Controller と Node の両方を実行する場合の設定を適用します。
 
 ```bash
 sudo runnerloom setup \
@@ -117,11 +133,11 @@ sudo runnerloom setup \
   --apply --non-interactive
 ```
 
-人間向けには `runnerloom setup` の対話形式も用意しています。対話形式でもネットワークやサービスを黙って変更しません。
+ここでは設定の保存と、Controller の CA、Node ID の初期化を行います。（この時点では、GitHub への接続確認や VM の起動確認はまだ完了していません）。
 
-ここでできるのは設定、ControllerのCA、同居NodeのIDの保存です。`githubReady: false`、`vmReady: false` は、まだ実接続・VM起動を確認していないという意味です。
+---
 
-## 6. イメージをControllerへ登録し、VM専用ネットワークを作る
+## 6. イメージの登録と VM ネットワークの構築
 
 ```bash
 sudo runnerloom image import \
@@ -135,13 +151,13 @@ sudo runnerloom network apply --config /var/lib/runnerloom/node-a/agent.json
 sudo runnerloom network check --config /var/lib/runnerloom/node-a/agent.json
 ```
 
-`ACTUAL_SHA256` は実際の64桁へ置換します。VMネットワークは、標準では `172.30.240.0/24` です。既存LAN・VPN経路と重なる場合は拒否します。別のプライベートIPv4 `/24` をNode設定に選んでください。
+`ACTUAL_SHA256` は実際の64桁のハッシュに置き換えてください。
 
-VMから自宅LAN、ホスト管理機能、他のVMへの通信を制限します。NATだけを作って隔離済みとは扱いません。既存のホストIP、DNS、ルーターのDHCP設定は書き換えません。
+VM 用ネットワークは、デフォルトで `172.30.240.0/24` が使用されます。既存の LAN や VPN のルーティングと競合する場合は適用が拒否されるため、その場合は設定ファイルで別のプライベート IPv4 サブネットを指定してください。
 
-NodeのイメージキャッシュとVMディスクは、この版では同じファイルシステム上に置いてください。読み取り専用の元イメージをhard linkで共有するためです。
+---
 
-## 7. 接続を確認して常駐させる
+## 7. 接続確認とサービスの起動（常駐化）
 
 ```bash
 sudo runnerloom github check --state /var/lib/runnerloom/controller
@@ -156,7 +172,7 @@ sudo runnerloom service install \
   --binary /usr/local/bin/runnerloom --start
 ```
 
-Controllerは専用ユーザー、Agentは信頼されたホスト管理プロセスとして起動します。Agentはlibvirtとファイアウォールを操作するため、現在の版では管理者権限を持ちます。GitHubのJobがホスト管理者として動くという意味ではありません。
+動作状況やログの確認は以下のコマンドで行います：
 
 ```bash
 sudo runnerloom status --state /var/lib/runnerloom/controller
@@ -165,13 +181,13 @@ sudo journalctl -u runnerloom-controller -n 100 --no-pager
 sudo journalctl -u runnerloom-agent-node-a -n 100 --no-pager
 ```
 
-初回はNodeがControllerからイメージを取得します。取得・SHA検証が済むまで `IMAGE_MISSING` と表示されます。失敗時に空のVMを起動することはありません。
+初回起動時は、Node が Controller からイメージを取得します。取得と検証が完了するまでは `IMAGE_MISSING` と表示されます。
 
-イメージや認証ファイルをサービスインストール後に更新するときは、Controllerの専用ユーザーが読める所有者・権限を保ってください。秘密鍵を全ユーザー読み取り可能にはしないでください。
+---
 
-## 8. GitHubから使う
+## 8. GitHub Actions からの利用
 
-許可したRepositoryに `.github/workflows/home-test.yml` を作ります。
+対象リポジトリに `.github/workflows/home-test.yml` を作成し、テストを実行します。
 
 ```yaml
 name: Home VM test
@@ -192,13 +208,15 @@ jobs:
           echo "Executed inside a disposable RunnerLoom VM"
 ```
 
-`runs-on` はPoolの `runnerName` です。Workflowを既定ブランチに保存し、Actionsの画面で手動実行します。初回のScale Set名が既に存在し、ローカルの所有記録がない場合は勝手に採用しません。自分が作成したものだと確認した場合だけ `runnerloom github adopt --pool linux-lite --id NUMBER` を使います。
+`runs-on` には Pool の `runnerName` を指定します。GitHub の Actions タブから手動（`workflow_dispatch`）で実行し、正常に VM がプロビジョニングされて処理が完了することを確認してください。
 
-## 9. 2台目を追加する
+---
 
-ControllerをLANでNodeから到達できるHTTPSアドレスで起動します。ルーターへのポート転送は不要です。既存の1台目Nodeの `controller` URLも、証明書の名前と合うものへ更新してください。URL・待受を変えたらサービスユニットを再生成します。
+## 9. 2台目（追加 Node）のセットアップ
 
-Controllerで期限付き招待を作成します。
+複数台構成にする場合、Controller は Node から LAN 経由で到達可能な HTTPS アドレスで起動している必要があります。
+
+Controller 側で招待用クレデンシャル（Invitation）を生成します：
 
 ```bash
 sudo install -d -m 0700 /var/lib/runnerloom/invitations
@@ -208,9 +226,9 @@ sudo runnerloom node invite \
   --out /var/lib/runnerloom/invitations/node-b.json
 ```
 
-招待ファイルには秘密が含まれます。信頼できる経路で追加PCへ渡し、使用後は削除してください。MACアドレスや、自動検出した名前だけでは信頼しません。
+生成された `node-b.json` を安全な方法で追加 Node に転送してください。（使用後は削除を推奨します）。
 
-追加PCで `examples/node.json` を編集し、0600で保存します。CPU・RAM・保存先の設定はそのPCの管理者が承認する値です。
+追加 Node 側で設定ファイルを準備し、セットアップを実行します：
 
 ```bash
 sudo runnerloom setup --role node \
@@ -219,50 +237,27 @@ sudo runnerloom setup --role node \
   --apply --non-interactive
 ```
 
-Controllerの `node pending` で申請名と鍵の指紋を確認して、`node approve ID` を実行します。追加PCで同じ参加コマンドをもう一度実行すると、承認済み証明書を受け取ります。招待は標準10分で切れるので、その間に受け取りまで済ませます。
+Controller 側で `runnerloom node pending` を実行して指紋（Fingerprint）を確認し、`runnerloom node approve ID` で承認します。承認後、追加 Node 側でもう一度同じ setup コマンドを実行すると、証明書が発行されて参加が完了します。
 
-その後は1台目と同様に `network plan/apply/check` と `service install --role agent` を実行します。設定済みPoolのうちサイズが合うものが候補になり、許可・空き・予約・イメージを照合して配置されます。
+---
 
-## 日常の操作
+## 日常のオペレーションコマンド
 
 ```bash
-# 新しい仕事の受付を止める。今の仕事は継続
+# 新規ジョブの受付を停止する（実行中のジョブは継続）
 sudo runnerloom node drain node-a --state /var/lib/runnerloom/controller
 
-# 再開
+# ジョブの受付を再開する
 sudo runnerloom node resume node-a --state /var/lib/runnerloom/controller
 
-# 特定の仕事を中断。CPU/RAMはホスト停止確認後に返却
+# 特定のジョブ（VM）を強制停止する
 sudo runnerloom vm stop VM_ID --state /var/lib/runnerloom/controller
 
-# Node側の診断ログ
-sudo runnerloom vm logs VM_ID --config /var/lib/runnerloom/node-a/agent.json
-
-# 設定変更は計画してから適用
+# 設定変更のプレビュー（Plan）
 sudo runnerloom config plan --file "$PWD/cluster.json" --state /var/lib/runnerloom/controller --json
+
+# 設定変更の適用（Apply）
 sudo runnerloom config apply --plan PLAN_ID --state /var/lib/runnerloom/controller --non-interactive --json
 ```
 
-Pool/GitHub接続の設定を変更したらControllerを再起動します。実行中VMは、それだけで停止しません。サイズやImageを変えるときは、新しいPool名を作ると環境を明確に分けられます。
-
-残したいモデル・ビルド成果物はJob終了前にArtifactや外部ストレージへ保存してください。VMディスクは永続保存場所ではありません。長時間学習では定期的に途中保存し、GitHub側の実行・トークン期限も確認します。
-
-
-## LAN自動発見とDHCPで変わるアドレス
-
-自動発見は任意です。使うPCに `avahi-daemon` と `avahi-utils` を入れ、ControllerをLANへ到達できる `.local` 名で起動します。ホストのDHCP設定を固定IPへ書き換える必要はありません。
-
-```bash
-sudo apt-get install -y avahi-daemon avahi-utils
-sudo runnerloom service install --role controller \
-  --state /var/lib/runnerloom/controller \
-  --listen 192.168.1.10:8443 --advertise https://controller.local:8443 \
-  --discoverable --start
-runnerloom discover --json
-```
-
-例のIPとホスト名は自分のLANへ置き換えてください。DHCPでControllerのIPが変わる場合は、LAN専用の待受を維持する方法（例: OS側のインターフェース方針とファイアウォールを確認した上で `0.0.0.0:8443`）を選びます。IP固定の `--listen` は変更後にはそのまま使えません。
-
-表示される候補は **未認証** です。発見画面の指紋を信用するのではなく、Controllerから受け取った招待の指紋で接続先を確認します。同じ `.local` 名の解決先IPが変わっても、TLSでは元の名前とCAを引き続き検証します。別VLAN・別拠点は自動発見対象ではありませんが、到達できるHTTPS URLの明示指定は利用できます。
-
-Node起動時はCPU数とRAMを実測し、承認上限が物理量を超えていないか再確認します。ハードウェアを減らした後や、別PCへ設定をコピーした場合は、設定を見直すまで実行を止めます。Nodeの秘密鍵そのものを別PCへコピーして使い回すことは禁止です。
+**※ 注意**: 保持しておきたい学習モデルやビルドの成果物は、ジョブが終了して VM が破棄される前に、外部ストレージや GitHub Artifacts に保存するように Workflow を構成してください。
