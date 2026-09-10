@@ -71,7 +71,10 @@ export RL_BINARY="$(command -v runnerloom)"
 
 1台構成の`127.0.0.1:8443`は別PCから到達できません。Controller serviceを、信頼するLAN interfaceのIPで再生成します。
 
+同じstateを使うControllerが起動中だとprocess lockにより更新を拒否するため、先に停止します。
+
 ```bash
+sudo systemctl stop runnerloom-controller.service
 sudo runnerloom service install \
   --role controller \
   --state "$RL_CONTROLLER_STATE" \
@@ -91,12 +94,13 @@ sudo systemctl restart runnerloom-agent-node-a.service
 確認します。
 
 ```bash
-sudo systemctl restart runnerloom-controller.service
 sudo journalctl -u runnerloom-controller.service -n 100 --no-pager
-curl --fail --cacert "$RL_CONTROLLER_STATE/ca.pem" "$RL_CONTROLLER_URL"/ 2>/dev/null || true
+sudo curl --silent --show-error --output /dev/null \
+  --cacert "$RL_CONTROLLER_STATE/ca.pem" \
+  "$RL_CONTROLLER_URL/"
 ```
 
-最後のHTTP pathが404でも、TLS接続自体を確認する材料になります。NodeからTCP/8443へ到達できない場合は、Controller hostのinterface、host firewall、VLANを確認してください。インターネットへのport forwardingは不要です。
+Controllerのroot pathはHTTP 404でも構いません。`curl`が終了コード0なら、CAで検証したTLS接続とHTTP応答までは成功しています。NodeからTCP/8443へ到達できない場合は、Controller hostのinterface、host firewall、VLANを確認してください。インターネットへのport forwardingは不要です。
 
 > [!WARNING]
 > `--listen 0.0.0.0:8443`は全interfaceで待ち受けます。必要性とhost firewallを確認できる場合だけ使い、可能ならLAN IPを明示してください。
@@ -269,11 +273,11 @@ sudo runnerloom network apply --config "$RL_NODE_STATE/agent.json"
 sudo runnerloom network check --config "$RL_NODE_STATE/agent.json"
 ```
 
-Node image cacheとVM disk directoryが同じfilesystemか確認します。
+Node state（その下にimage cacheが作られます）とVM disk directoryが同じfilesystemか確認します。
 
 ```bash
 sudo mkdir -p "$RL_DISK_DIR"
-findmnt -T "$RL_NODE_STATE/images"
+findmnt -T "$RL_NODE_STATE"
 findmnt -T "$RL_DISK_DIR"
 ```
 
@@ -338,9 +342,10 @@ sudo runnerloom node resume node-a --state "$RL_CONTROLLER_STATE"
 sudo apt-get install -y avahi-daemon avahi-utils
 ```
 
-Controller serviceを、LANから到達できる`.local` URLで再生成します。
+Controller serviceを、LANから到達できる`.local` URLで再生成します。Controllerを止め、すべてのNodeの`agent.json`にある`controller`も同じURLへ変更してください。
 
 ```bash
+sudo systemctl stop runnerloom-controller.service
 sudo runnerloom service install \
   --role controller \
   --state "$RL_CONTROLLER_STATE" \
@@ -350,7 +355,7 @@ sudo runnerloom service install \
   --discoverable --start
 ```
 
-探索側:
+各Agentを再起動した後、探索側で確認します。
 
 ```bash
 runnerloom discover --json
