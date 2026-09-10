@@ -11,7 +11,8 @@
 ```bash
 export RL_CONTROLLER_STATE="/var/lib/runnerloom/controller"
 export RL_NODE_NAME="node-a"
-export RL_NODE_CONFIG="/var/lib/runnerloom/node-a/agent.json"
+export RL_NODE_STATE="/var/lib/runnerloom/node-a"
+export RL_NODE_CONFIG="$RL_NODE_STATE/agent.json"
 ```
 
 次を上から順に実行します。
@@ -103,16 +104,18 @@ sudo find /var/lib/runnerloom/controller -maxdepth 2 -printf '%M %u:%g %p\n'
 sudo find /var/lib/runnerloom/node-a -maxdepth 2 -printf '%M %u:%g %p\n'
 ```
 
-private keyやcredential fileを`chmod 644`で回避しないでください。Controller serviceのinstallは、Controller state treeを専用`runnerloom-controller`ユーザーへ安全にchownします。
+private keyやcredential fileを`chmod 644`で回避しないでください。Controller serviceのinstallは、Controller state treeを専用`runnerloom-controller`ユーザーへ安全にchownします。再生成前に同じstateを使うControllerを止めます。
 
 ```bash
+sudo systemctl stop runnerloom-controller.service
 sudo runnerloom service install \
   --role controller \
   --state /var/lib/runnerloom/controller \
-  --binary "$(command -v runnerloom)"
+  --binary "$(command -v runnerloom)" \
+  --start
 ```
 
-同じstate directoryを別Controller processが使っている場合は、permission変更ではなくprocess競合を解消します。
+同じstate directoryを手動Controller processが使っている場合も停止してください。permission変更でprocess lockを回避しないでください。
 
 ## 4. `setup`は成功したが何も動かない
 
@@ -200,7 +203,7 @@ sudo runnerloom network check --config "$RL_NODE_CONFIG"
 RunnerLoom所有のnetwork sealがある状態でAgent serviceを起動すると、明示承認済みnetworkを復元します。先に`network apply`が成功している必要があります。
 
 ```bash
-sudo test -f /var/lib/runnerloom/node-a/network/network-seal.json
+sudo test -f "$RL_NODE_STATE/network/network-seal.json"
 sudo systemctl restart "runnerloom-agent-$RL_NODE_NAME.service"
 ```
 
@@ -234,7 +237,7 @@ sudo find "$RL_CONTROLLER_STATE/images" -maxdepth 1 -type f -ls
 Node cache:
 
 ```bash
-sudo find /var/lib/runnerloom/node-a/images -maxdepth 1 -type f -ls
+sudo find "$RL_NODE_STATE/images" -maxdepth 1 -type f -ls
 sudo journalctl -u "runnerloom-agent-$RL_NODE_NAME.service" -n 200 --no-pager
 ```
 
@@ -256,8 +259,10 @@ digestを架空の値へ変更したり、検証を飛ばしたfileを手動rena
 - hard link作成に失敗する
 - `image cache and VM storage must share a filesystem`
 
+Node image cacheはNode stateの下に作られるため、存在済みのNode stateとVM disk directoryのmountを比較します。
+
 ```bash
-findmnt -T /var/lib/runnerloom/node-a/images
+findmnt -T "$RL_NODE_STATE"
 findmnt -T /var/lib/libvirt/images/runnerloom-home-node-a
 ```
 
