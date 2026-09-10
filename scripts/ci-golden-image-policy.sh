@@ -39,6 +39,9 @@ required={
     'apt-daily-upgrade.service','apt-daily-upgrade.timer',
     'lxd-installer.socket','fwupd.service','fwupd-refresh.service','fwupd-refresh.timer',
 }
+required_capabilities={
+    'network','ca-certificates','git','python3','build-essential','jq','sudo','actions-runner',
+}
 if policy.get('schemaVersion') != 'runnerloom/image-policy/v1':
     raise SystemExit('unexpected image policy schema')
 if policy.get('defaultTarget') != 'multi-user.target':
@@ -47,6 +50,9 @@ masked=set(policy.get('maskedUnits',[]))
 missing=sorted(required-masked)
 if missing:
     raise SystemExit(f'required masks missing from policy: {missing}')
+capabilities=set(policy.get('retainedCapabilities',[]))
+if capabilities != required_capabilities:
+    raise SystemExit(f'unexpected retained capabilities: {sorted(capabilities)}')
 actual=subprocess.run(['systemctl','get-default'],check=True,text=True,capture_output=True).stdout.strip()
 if actual != 'multi-user.target':
     raise SystemExit(f'unexpected default target: {actual}')
@@ -62,8 +68,30 @@ for unit in sorted(masked):
 print('RUNNERLOOM_IMAGE_POLICY_JSON='+json.dumps(policy,sort_keys=True,separators=(',',':')))
 print('RUNNERLOOM_IMAGE_POLICY_OK')
 VERIFY
+
+test -s /etc/ssl/certs/ca-certificates.crt
+command -v git >/dev/null
+git --version
+command -v python3 >/dev/null
+python3 --version
+command -v gcc >/dev/null
+command -v g++ >/dev/null
+command -v make >/dev/null
+dpkg-query -W -f='${Status}\n' build-essential | grep -qx 'install ok installed'
+command -v jq >/dev/null
+jq --version
+command -v sudo >/dev/null
+sudo -n -u runner true
+python3 - <<'NETWORK'
+import ssl,urllib.request
+with urllib.request.urlopen('https://github.com/robots.txt',timeout=30,context=ssl.create_default_context()) as response:
+    if response.status != 200:
+        raise SystemExit(f'unexpected HTTPS status: {response.status}')
+NETWORK
+
 test -x /opt/actions-runner/bin/Runner.Listener
 runuser -u runner -- /opt/actions-runner/bin/Runner.Listener --version
+echo RUNNERLOOM_RETAINED_CAPABILITIES_OK
 systemd_time=$(systemd-analyze time --no-pager 2>&1 || true)
 printf 'RUNNERLOOM_SYSTEMD_TIME=%s\n' "${systemd_time//$'\n'/ }"
 systemd-analyze blame --no-pager 2>&1 | head -n 40 || true
@@ -96,7 +124,7 @@ status=$?
 set -e
 end=$(date +%s)
 
-if [[ "$status" != 0 ]] || ! grep -q '^RUNNERLOOM_IMAGE_POLICY_OK' "$EVIDENCE/serial.log" || ! grep -q '^RUNNERLOOM_GOLDEN_POLICY_QUALIFIED' "$EVIDENCE/serial.log" || ! grep -q '^RUNNERLOOM_POLICY_EXIT=0' "$EVIDENCE/serial.log"; then
+if [[ "$status" != 0 ]] || ! grep -q '^RUNNERLOOM_IMAGE_POLICY_OK' "$EVIDENCE/serial.log" || ! grep -q '^RUNNERLOOM_RETAINED_CAPABILITIES_OK' "$EVIDENCE/serial.log" || ! grep -q '^RUNNERLOOM_GOLDEN_POLICY_QUALIFIED' "$EVIDENCE/serial.log" || ! grep -q '^RUNNERLOOM_POLICY_EXIT=0' "$EVIDENCE/serial.log"; then
   tail -n 200 "$EVIDENCE/serial.log" >&2 || true
   echo 'Golden Image policy qualification failed' >&2
   exit 1
