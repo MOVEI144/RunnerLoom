@@ -116,7 +116,7 @@ home-linux-lite-v2  →  smoke test → production workflow
 
 ## Backup
 
-Controllerを止めた状態で一貫したbackupを取ります。`backup --out`は既存ファイルを上書きしないため、実行ごとに新しい名前を使います。
+Controllerを止めた状態で一貫したbackupを取ります。`backup --out`は既存ファイルを上書きしないため、`mktemp -d`で毎回一意のprivate directoryを確保します。
 
 ```bash
 sudo runnerloom node drain "$RL_NODE_NAME" \
@@ -125,13 +125,22 @@ sudo runnerloom node drain "$RL_NODE_NAME" \
 sudo systemctl stop "runnerloom-agent-$RL_NODE_NAME.service"
 sudo systemctl stop runnerloom-controller.service
 
-sudo install -d -m 0700 /var/backups/runnerloom
-backup="/var/backups/runnerloom/controller-$(date -u +%Y%m%dT%H%M%SZ).db"
-sudo runnerloom backup \
-  --state "$RL_CONTROLLER_STATE" \
-  --out "$backup"
-printf 'saved: %s\n' "$backup"
+(
+  set -euo pipefail
+  backup_root="/var/backups/runnerloom"
+  sudo install -d -m 0700 "$backup_root"
+  backup_dir="$(sudo mktemp -d "$backup_root/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")"
+  backup="$backup_dir/controller.db"
+
+  sudo runnerloom backup \
+    --state "$RL_CONTROLLER_STATE" \
+    --out "$backup"
+  sudo test -s "$backup"
+  printf 'saved: %s\n' "$backup"
+)
 ```
+
+このblockはbackup作成または存在確認に失敗すると非ゼロで終了し、`saved:`を表示しません。同じ秒に再実行しても、一意のdirectoryを確保します。
 
 `backup`が保存するのはSQLite snapshotです。完全な復旧には次も必要です。
 
@@ -245,7 +254,7 @@ sudo runnerloom service install \
 
 ## 更新
 
-Release更新は [INSTALL.mdの更新手順](INSTALL.md) に従います。最低限、次の順番を守ります。
+Release更新は [INSTALL.mdの更新手順](INSTALL.md#更新手順) に従います。最低限、次の順番を守ります。
 
 ```text
 drain
@@ -260,17 +269,4 @@ drain
 
 ## 障害時に保存する情報
 
-秘密を除き、次を記録すると調査しやすくなります。
-
-```bash
-runnerloom version --json
-runnerloom doctor
-sudo runnerloom status --state "$RL_CONTROLLER_STATE" --json
-sudo runnerloom node list --state "$RL_CONTROLLER_STATE" --json
-sudo runnerloom pool explain linux-lite --state "$RL_CONTROLLER_STATE" --json
-sudo runnerloom vm list --state "$RL_CONTROLLER_STATE" --json
-sudo journalctl -u runnerloom-controller.service --since -1h --no-pager
-sudo journalctl -u "runnerloom-agent-$RL_NODE_NAME.service" --since -1h --no-pager
-```
-
-出力を共有する前に、招待secret、JIT config、private key、GitHub token、App key、内部URLなどが含まれていないか確認してください。
+秘密を除き、次を記録すると調査しやすくなります。共有前の除外事項とprivateな収集方法は [トラブルシューティング](TROUBLESHOOTING.ja.md#調査情報を保存する) を参照してください。

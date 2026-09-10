@@ -44,15 +44,41 @@ gh release download "$tag" --repo MOVEI144/RunnerLoom
 
 `gh`を使わない場合は、ブラウザから同じReleaseのassetを1つの空ディレクトリへ保存します。
 
-### 2. checksumを確認する
+### 2. インストールする1ファイルを選び、checksumを確認する
 
-ダウンロードしたディレクトリで実行します。
+まず、使うarchiveまたは`.deb`の **正確なファイル名を1つ** 選びます。
 
 ```bash
-sha256sum --check --ignore-missing SHA256SUMS
+ls -1 runnerloom-*-linux-amd64.tar.gz runnerloom_*_amd64.deb 2>/dev/null
+
+# 上の表示から、実際にインストールする1ファイルの正確な名前へ置換する
+asset="runnerloom-X.Y.Z-linux-amd64.tar.gz"
 ```
 
-インストールするarchiveまたは`.deb`に対して `OK` が必要です。`FAILED`、ファイル不足、別Releaseの混在がある場合はインストールしないでください。
+次のblockは、選んだファイルが存在し、`SHA256SUMS`にそのファイルのentryがちょうど1件あり、digestが一致した場合だけ成功します。別Releaseの`SHA256SUMS`、entry不足、ファイル不足、checksum不一致はすべて失敗します。
+
+```bash
+(
+  set -euo pipefail
+  test -f "$asset"
+  selected_checksum="$(mktemp)"
+  trap 'rm -f "$selected_checksum"' EXIT
+
+  awk -v asset="$asset" '
+    $1 ~ /^[0-9a-fA-F]{64}$/ && $2 == asset { print; found++ }
+    END {
+      if (found != 1) {
+        print "selected asset must have exactly one checksum entry" > "/dev/stderr"
+        exit 1
+      }
+    }
+  ' SHA256SUMS > "$selected_checksum"
+
+  sha256sum --check "$selected_checksum"
+)
+```
+
+選択したファイルに対して `OK` が表示され、block全体が終了コード0になることを確認してください。
 
 `SHA256SUMS`は破損やRelease取り違えを検出します。Publisher自体の侵害まで防ぐものではありません。`buildinfo.json`にはsource commit、Go版、target、依存情報が記録されています。
 
@@ -60,20 +86,30 @@ sha256sum --check --ignore-missing SHA256SUMS
 
 #### Debian packageを使う
 
-ダウンロードディレクトリにRunnerLoomの`.deb`が1つだけあることを確認してから実行します。
+手順2で選んだ`asset`が`.deb`であることを確認してから実行します。
 
 ```bash
-ls -l runnerloom_*_amd64.deb
-sudo apt install ./runnerloom_*_amd64.deb
+case "$asset" in
+  runnerloom_*_amd64.deb) sudo apt install "./$asset" ;;
+  *) echo 'asset is not a RunnerLoom Debian package' >&2; false ;;
+esac
 ```
 
 CLIは通常 `/usr/bin/runnerloom` に入ります。packageにはserviceを自動起動するmaintainer scriptはありません。
 
 #### Archiveを使う
 
+手順2で選んだ`asset`がarchiveであることを確認してから実行します。
+
 ```bash
-tar -xzf runnerloom-*-linux-amd64.tar.gz
-cd runnerloom-*-linux-amd64
+case "$asset" in
+  runnerloom-*-linux-amd64.tar.gz) ;;
+  *) echo 'asset is not a RunnerLoom Linux archive' >&2; false ;;
+esac
+
+tar -xzf "$asset"
+archive_dir="${asset%.tar.gz}"
+cd "$archive_dir"
 ./runnerloom version --json
 sudo install -m 0755 runnerloom /usr/local/bin/runnerloom
 ```
@@ -130,15 +166,20 @@ First GitHub Job
 
 ## 更新手順
 
+以下ではNode名を`node-a`とします。実環境のNode名へ置き換えてください。
+
+```bash
+node_name="node-a"
+controller_state="/var/lib/runnerloom/controller"
+```
+
 ### 1. 新しいJobを止める
 
 Controllerが動作している状態で、対象Nodeをdrainします。
 
 ```bash
-sudo runnerloom node drain node-a \
-  --state /var/lib/runnerloom/controller
-sudo runnerloom status \
-  --state /var/lib/runnerloom/controller
+sudo runnerloom node drain "$node_name" --state "$controller_state"
+sudo runnerloom status --state "$controller_state"
 ```
 
 実行中Jobが終わり、保持中のVM資源がなくなったことを確認します。
@@ -150,22 +191,27 @@ sudo runnerloom status \
 ```bash
 systemctl list-unit-files 'runnerloom-*'
 sudo systemctl stop runnerloom-controller.service
-sudo systemctl stop runnerloom-agent-node-a.service
+sudo systemctl stop "runnerloom-agent-$node_name.service"
 ```
-
-Node名が異なる場合はunit名も置き換えてください。
 
 ### 3. offline backupを取る
 
-`backup --out`は既存ファイルを上書きしません。更新のたびに新しい名前を使います。
+`backup --out`は既存ファイルを上書きしません。`mktemp -d`で毎回一意のprivate directoryを確保し、その中へ新しいDB snapshotを作ります。
 
 ```bash
-sudo install -d -m 0700 /var/backups/runnerloom
-backup="/var/backups/runnerloom/controller-$(date -u +%Y%m%dT%H%M%SZ).db"
-sudo runnerloom backup \
-  --state /var/lib/runnerloom/controller \
-  --out "$backup"
-printf 'saved: %s\n' "$backup"
+(
+  set -euo pipefail
+  backup_root="/var/backups/runnerloom"
+  sudo install -d -m 0700 "$backup_root"
+  backup_dir="$(sudo mktemp -d "$backup_root/$(date -u +%Y%m%dT%H%M%SZ)-XXXXXXXX")"
+  backup="$backup_dir/controller.db"
+
+  sudo runnerloom backup \
+    --state "$controller_state" \
+    --out "$backup"
+  sudo test -s "$backup"
+  printf 'saved: %s\n' "$backup"
+)
 ```
 
 DBだけでは完全な復旧backupになりません。次も別途、privateな保存先へ保全します。
@@ -190,18 +236,17 @@ runnerloom doctor --strict
 
 ```bash
 sudo systemctl start runnerloom-controller.service
-sudo systemctl start runnerloom-agent-node-a.service
+sudo systemctl start "runnerloom-agent-$node_name.service"
 
-sudo runnerloom status --state /var/lib/runnerloom/controller
-sudo runnerloom github check --state /var/lib/runnerloom/controller
-sudo runnerloom pool explain linux-lite --state /var/lib/runnerloom/controller
+sudo runnerloom status --state "$controller_state"
+sudo runnerloom github check --state "$controller_state"
+sudo runnerloom pool explain linux-lite --state "$controller_state"
 ```
 
 最後に、秘密情報を使わない小さな手動Workflowを1回実行し、Job成功とVM削除を確認してからNodeをresumeします。
 
 ```bash
-sudo runnerloom node resume node-a \
-  --state /var/lib/runnerloom/controller
+sudo runnerloom node resume "$node_name" --state "$controller_state"
 ```
 
 ## Downgrade / rollback
@@ -212,11 +257,12 @@ sudo runnerloom node resume node-a \
 
 ## データを残して削除する
 
-最初にdrainし、Job完了とVM cleanupを確認します。生成済みunitを停止・無効化した後でbinary/packageを削除します。
+最初にdrainし、Job完了とVM cleanupを確認します。以下の`node_name`を実際の設定へ置き換え、生成済みunitを停止・無効化した後でbinary/packageを削除します。
 
 ```bash
+node_name="node-a"
 sudo systemctl disable --now runnerloom-controller.service
-sudo systemctl disable --now runnerloom-agent-node-a.service
+sudo systemctl disable --now "runnerloom-agent-$node_name.service"
 
 # Debian packageで入れた場合
 sudo apt remove runnerloom

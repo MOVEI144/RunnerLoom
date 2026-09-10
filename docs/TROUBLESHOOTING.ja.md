@@ -140,18 +140,35 @@ networkChanged: false
 serviceInstalled: false
 ```
 
-[Quickstart](QUICKSTART.ja.md) の手順5以降を続けてください。
+[Quickstart](QUICKSTART.ja.md#5-imageを登録し専用vm-networkを作る) の手順5以降を続けてください。
 
 ## 5. `github check`が失敗する
 
-### 確認する値
+credential JSONの全文を表示しないでください。Client ID、Installation ID、参照先pathは秘密鍵本文ではありませんが、共有用診断には不要な識別情報です。次の確認は値を表示せず、構造・権限・参照先の可読性だけを検査します。
 
 ```bash
-sudo jq . /var/lib/runnerloom/controller/github-credentials.json
-sudo stat -c '%a %U:%G %n' \
-  /var/lib/runnerloom/controller/github-credentials.json \
-  /var/lib/runnerloom/controller/github-app.pem
+credential_file="/var/lib/runnerloom/controller/github-credentials.json"
+
+sudo jq -e '
+  ((keys | sort) == ["tokenFile"] and
+    (.tokenFile | type == "string" and startswith("/"))) or
+  ((keys | sort) == ["clientID", "installationID", "privateKeyFile"] and
+    (.clientID | type == "string" and length > 0) and
+    (.installationID | type == "number" and . > 0) and
+    (.privateKeyFile | type == "string" and startswith("/")))
+' "$credential_file" >/dev/null &&
+  echo 'credential JSON structure: OK'
+
+sudo stat -c 'credential JSON mode=%a owner=%U:%G' "$credential_file"
+sudo sh -eu -c '
+  material="$(jq -r ".privateKeyFile // .tokenFile" "$1")"
+  test -n "$material"
+  test -r "$material"
+  stat -c "referenced material mode=%a owner=%U:%G" "$material"
+' sh "$credential_file"
 ```
+
+この出力はIDやpathを表示しません。それでも外部共有前にOrganization名、Repository名、内部addressなどを確認してください。
 
 Cluster設定とGitHub側で、次を一致させます。
 
@@ -192,7 +209,7 @@ ip -4 addr
 sudo virsh -c qemu:///system net-list --all
 ```
 
-Node設定の`networkCIDR`を、LAN、VPN、Docker/Podman、別NodeのRunnerLoom networkと重ならないprivate IPv4 `/24`へ変更します。変更後はplanを読み直してからapplyします。
+Node設定の`networkCIDR`を、LAN、VPN、Docker/Podman、別のRunnerLoom networkと重ならないprivate IPv4 `/24`へ変更します。変更後はplanを読み直してからapplyします。
 
 ```bash
 sudo runnerloom network plan --config "$RL_NODE_CONFIG"
@@ -353,30 +370,35 @@ sudo runnerloom pool explain linux-lite --state "$RL_CONTROLLER_STATE"
 
 ## 調査情報を保存する
 
-秘密を除いた診断bundleの代わりとして、次をprivate directoryへ保存できます。
+診断fileは収集中からprivateにします。次のblockはsubshell内で`umask 077`を設定し、directoryを0700で作成します。リダイレクトで作られるfileも最初からowner以外には読めません。
 
 ```bash
-mkdir -p runnerloom-diagnostics
-runnerloom version --json > runnerloom-diagnostics/version.json
-runnerloom doctor > runnerloom-diagnostics/doctor.txt
-sudo runnerloom status --state "$RL_CONTROLLER_STATE" --json \
-  > runnerloom-diagnostics/status.json
-sudo runnerloom node list --state "$RL_CONTROLLER_STATE" --json \
-  > runnerloom-diagnostics/nodes.json
-sudo runnerloom pool explain linux-lite --state "$RL_CONTROLLER_STATE" --json \
-  > runnerloom-diagnostics/pool-explain.json
-sudo runnerloom vm list --state "$RL_CONTROLLER_STATE" --json \
-  > runnerloom-diagnostics/vms.json
-sudo journalctl -u runnerloom-controller.service --since -1h --no-pager \
-  > runnerloom-diagnostics/controller.log
-sudo journalctl -u "runnerloom-agent-$RL_NODE_NAME.service" --since -1h --no-pager \
-  > runnerloom-diagnostics/agent.log
-chmod -R go-rwx runnerloom-diagnostics
+(
+  set -euo pipefail
+  umask 077
+  install -d -m 0700 runnerloom-diagnostics
+
+  runnerloom version --json > runnerloom-diagnostics/version.json
+  runnerloom doctor > runnerloom-diagnostics/doctor.txt
+  sudo runnerloom status --state "$RL_CONTROLLER_STATE" --json \
+    > runnerloom-diagnostics/status.json
+  sudo runnerloom node list --state "$RL_CONTROLLER_STATE" --json \
+    > runnerloom-diagnostics/nodes.json
+  sudo runnerloom pool explain linux-lite --state "$RL_CONTROLLER_STATE" --json \
+    > runnerloom-diagnostics/pool-explain.json
+  sudo runnerloom vm list --state "$RL_CONTROLLER_STATE" --json \
+    > runnerloom-diagnostics/vms.json
+  sudo journalctl -u runnerloom-controller.service --since -1h --no-pager \
+    > runnerloom-diagnostics/controller.log
+  sudo journalctl -u "runnerloom-agent-$RL_NODE_NAME.service" --since -1h --no-pager \
+    > runnerloom-diagnostics/agent.log
+)
 ```
 
 共有前に次を必ず除外します。
 
 - GitHub App private key、PAT、installation token
+- Client ID、Installation ID、credentialやprivate keyのpath
 - invitation secret
 - JIT configuration
 - Node private key

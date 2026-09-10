@@ -61,9 +61,22 @@ export RL_NETWORK_CIDR="172.30.240.0/24"
 export RL_IMAGE="/var/lib/runnerloom/builds/ubuntu-runner.qcow2"
 export RL_POOL="linux-lite"
 export RL_BINARY="$(command -v runnerloom)"
+
+# Image作成後にterminalを開き直した場合、manifestからdigestも復元する
+if sudo test -f "$RL_IMAGE.manifest.json"; then
+  export RL_IMAGE_DIGEST="$(
+    sudo python3 -c '
+import json, re, sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))["digest"]
+if not re.fullmatch(r"sha256:[0-9a-f]{64}", value):
+    raise SystemExit("invalid image digest in manifest")
+print(value)
+' "$RL_IMAGE.manifest.json"
+  )"
+fi
 ```
 
-新しいterminalを開いた場合は、このblockをもう一度実行してください。
+新しいterminalを開いた場合は、このblockをもう一度実行してください。Golden Image作成後なら`RL_IMAGE_DIGEST`も自動的に復元されます。
 
 ## 1. Hostを準備する
 
@@ -127,7 +140,15 @@ Organization
 | Public repositories | 許可しない |
 | Workflow access | 必要なら実行を許可するWorkflowへ限定 |
 
-作成後、Runner Groupの **数値ID** を控えます。GitHub Appのcredentialとは別の値です。
+作成後、Runner Groupの **数値ID** を控えます。IDが画面に見えない場合は、Organization名を置換して一覧を取得できます。
+
+```bash
+org="OWNER"
+gh api "/orgs/$org/actions/runner-groups" \
+  --jq '.runner_groups[] | [.id, .name, .visibility] | @tsv'
+```
+
+使用するGroup名と同じ行の先頭の数値が`runnerGroupID`です。
 
 GitHub公式: [Managing access to self-hosted runners using groups](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/manage-access)
 
@@ -176,11 +197,13 @@ sudoedit "$RL_CONTROLLER_STATE/github-credentials.json"
 確認します。
 
 ```bash
-sudo jq . "$RL_CONTROLLER_STATE/github-credentials.json"
+sudo jq -e '
+  (.clientID | type == "string" and length > 0) and
+  (.installationID | type == "number" and . > 0) and
+  (.privateKeyFile | type == "string" and startswith("/"))
+' "$RL_CONTROLLER_STATE/github-credentials.json" >/dev/null
 sudo test -r "$RL_CONTROLLER_STATE/github-app.pem"
-sudo stat -c '%a %U:%G %n' \
-  "$RL_CONTROLLER_STATE/github-credentials.json" \
-  "$RL_CONTROLLER_STATE/github-app.pem"
+echo 'GitHub App credential files: readable'
 ```
 
 この時点ではGitHub API接続をまだ確認していません。`github check`はCluster設定保存後に実行します。
@@ -202,7 +225,7 @@ sudo test -f "$RL_IMAGE.manifest.json"
 sudo jq '{digest, runnerVersion, os, architecture, registered}' \
   "$RL_IMAGE.manifest.json"
 
-export RL_IMAGE_DIGEST="$(sudo jq -r .digest "$RL_IMAGE.manifest.json")"
+export RL_IMAGE_DIGEST="$(sudo jq -er .digest "$RL_IMAGE.manifest.json")"
 printf '%s\n' "$RL_IMAGE_DIGEST"
 ```
 
@@ -213,7 +236,7 @@ printf '%s\n' "$RL_IMAGE_DIGEST"
 - `registered` が `false` になる
 - `runnerVersion` が実際に解決された版を表示する
 
-`RL_IMAGE_DIGEST`は以降の設定とimportで同じ値を使います。
+`RL_IMAGE_DIGEST`は以降の設定とimportで同じ値を使います。terminalを開き直した場合は、手順0の変数blockを再実行してください。
 
 ## 4. Cluster設定と同居Node IDを作る
 
@@ -285,7 +308,11 @@ sudo runnerloom status --state "$RL_CONTROLLER_STATE"
 
 ### 5-1. Controller配布用cacheへImageをimportする
 
+`RL_IMAGE_DIGEST`が空でないことを先に確認します。
+
 ```bash
+test -n "${RL_IMAGE_DIGEST:-}"
+
 sudo runnerloom image import \
   --state "$RL_CONTROLLER_STATE" \
   --file "$RL_IMAGE" \
@@ -331,7 +358,7 @@ sudo runnerloom github check \
   --state "$RL_CONTROLLER_STATE"
 ```
 
-`accessVerified: true` が成功条件です。失敗した場合はserviceを起動せず、[トラブル対応](TROUBLESHOOTING.ja.md) のGitHub欄を確認してください。
+`accessVerified: true` が成功条件です。失敗した場合はserviceを起動せず、[トラブル対応](TROUBLESHOOTING.ja.md#5-github-checkが失敗する) のGitHub欄を確認してください。
 
 ### 6-2. Controller serviceを入れる
 

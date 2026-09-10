@@ -45,7 +45,7 @@
 | VM network | `172.30.241.0/24` |
 | Image cache | `100 GiB` |
 
-NodeごとのVM network CIDRは、既存LAN、VPN、container network、他のRunnerLoom Nodeと重ならないprivate `/24`を選びます。
+NodeごとのVM network CIDRは、既存LAN、VPN、container network、他のRunnerLoom networkと重ならないprivate `/24`を選びます。
 
 Controller側:
 
@@ -56,7 +56,7 @@ export RL_CONTROLLER_URL="https://192.168.1.10:8443"
 export RL_NEW_NODE="node-b"
 ```
 
-追加Node側:
+追加Node側では、まだ`runnerloom`のpathを変数へ保存しません。CLIのインストール後に`RL_BINARY`を設定します。
 
 ```bash
 export RL_NODE_NAME="node-b"
@@ -64,7 +64,6 @@ export RL_NODE_STATE="/var/lib/runnerloom/node-b"
 export RL_DISK_DIR="/var/lib/libvirt/images/runnerloom-home-node-b"
 export RL_NETWORK_CIDR="172.30.241.0/24"
 export RL_CONTROLLER_URL="https://192.168.1.10:8443"
-export RL_BINARY="$(command -v runnerloom)"
 ```
 
 ## 2. ControllerをLANから到達可能にする
@@ -153,7 +152,7 @@ sudo systemctl restart runnerloom-controller.service
 
 ## 4. 追加Nodeを準備する
 
-追加NodeへRunnerLoomをインストールし、KVM/libvirtを準備します。詳細は [INSTALL.md](INSTALL.md) と [QuickstartのHost準備](QUICKSTART.ja.md) を参照してください。
+追加NodeへRunnerLoomをインストールし、KVM/libvirtを準備します。詳細は [INSTALL.md](INSTALL.md) と [QuickstartのHost準備](QUICKSTART.ja.md#1-hostを準備する) を参照してください。
 
 ```bash
 sudo apt-get update
@@ -164,7 +163,12 @@ sudo apt-get install -y \
   ca-certificates curl jq
 sudo systemctl enable --now libvirtd
 runnerloom doctor --strict
+
+export RL_BINARY="$(command -v runnerloom)"
+test -n "$RL_BINARY"
 ```
+
+`RL_BINARY`はCLIをインストールした後に設定します。空のままservice installへ渡さないでください。
 
 Node固有設定を作ります。
 
@@ -281,9 +285,12 @@ findmnt -T "$RL_NODE_STATE"
 findmnt -T "$RL_DISK_DIR"
 ```
 
-Agent serviceを入れます。
+Agent serviceを入れます。`RL_BINARY`が現在のCLIを指していることを直前にも確認します。
 
 ```bash
+export RL_BINARY="$(command -v runnerloom)"
+test -n "$RL_BINARY"
+
 sudo runnerloom service install \
   --role agent \
   --state "$RL_NODE_STATE" \
@@ -328,7 +335,7 @@ Poolの`allowedPools`、Node budget、Image digest、network、heartbeatを順�
 sudo runnerloom node drain node-a --state "$RL_CONTROLLER_STATE"
 ```
 
-[Quickstartのsmoke workflow](QUICKSTART.ja.md) を実行し、`runner_name`、Node journal、VM状態から`node-b`へ配置されたことを確認します。Job後にVMが`Deleted`となったら、1台目をresumeします。
+[Quickstartのsmoke workflow](QUICKSTART.ja.md#7-最初のgithub-actions-jobを実行する) を実行し、`runner_name`、Node journal、VM状態から`node-b`へ配置されたことを確認します。Job後にVMが`Deleted`となったら、1台目をresumeします。
 
 ```bash
 sudo runnerloom node resume node-a --state "$RL_CONTROLLER_STATE"
