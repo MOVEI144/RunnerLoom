@@ -61,8 +61,37 @@ export LIBGUESTFS_BACKEND=direct
 # used only offline, avoiding distribution-specific passt privilege/namespace
 # failures without disabling AppArmor or modifying host networking.
 python3 - "$WORK" <<'PYSEED'
-import json,pathlib,sys
+import json,pathlib,shlex,sys
 p=pathlib.Path(sys.argv[1]);url=(p/'runner.url').read_text();digest=(p/'runner.sha256').read_text()
+masked_units=[
+    'ssh.service','ssh.socket','serial-getty@ttyS0.service',
+    'snapd.service','snapd.socket','snapd.seeded.service',
+    'ModemManager.service','udisks2.service','polkit.service',
+    'apport.service','apport-autoreport.service','apport-autoreport.timer',
+    'unattended-upgrades.service','apt-daily.service','apt-daily.timer',
+    'apt-daily-upgrade.service','apt-daily-upgrade.timer',
+    'lxd-installer.socket','fwupd.service','fwupd-refresh.service','fwupd-refresh.timer',
+]
+policy={
+    'schemaVersion':'runnerloom/image-policy/v1',
+    'defaultTarget':'multi-user.target',
+    'maskedUnits':masked_units,
+    'retainedCapabilities':['network','ca-certificates','git','python3','build-essential','jq','sudo','actions-runner'],
+    'scope':'headless single-job ephemeral GitHub Actions runner',
+}
+(p/'image-policy.json').write_text(json.dumps(policy,indent=2,sort_keys=True)+'\n')
+hardening=['systemctl set-default multi-user.target']
+for unit in masked_units:
+    q=shlex.quote(unit)
+    hardening += [
+        f'systemctl stop {q} 2>/dev/null || true',
+        f'systemctl disable {q} 2>/dev/null || true',
+        f'systemctl mask {q} >/dev/null',
+    ]
+hardening += [
+    "test \"$(systemctl get-default)\" = multi-user.target",
+    "for unit in " + ' '.join(shlex.quote(unit) for unit in masked_units) + "; do state=$(systemctl is-enabled \"$unit\" 2>/dev/null || true); test \"$state\" = masked || { echo \"unit was not masked: $unit ($state)\" >&2; exit 1; }; done",
+]
 script=r"""#!/bin/bash
 set -euo pipefail
 trap 'rc=$?; echo RUNNERLOOM_BUILD_EXIT=$rc; sync; sleep 2; systemctl poweroff --no-block' EXIT
@@ -81,11 +110,12 @@ chown -R runner:runner /opt/actions-runner /home/runner
 runuser -u runner -- ./bin/Runner.Listener --version | tee /etc/runnerloom-runner-version
 rm -f /tmp/runner.tar.gz
 rm -f /opt/actions-runner/.runner /opt/actions-runner/.credentials /opt/actions-runner/.credentials_rsaparams
+__HARDENING__
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 echo RUNNERLOOM_GOLDEN_BUILD_COMPLETE
-""".replace('__URL__',url).replace('__DIGEST__',digest)
-config={'growpart':{'mode':'auto','devices':['/'],'ignore_growroot_disabled':False},'resize_rootfs':True,'ssh_pwauth':False,'disable_root':True,'bootcmd':[['systemctl','mask','--now','serial-getty@ttyS0.service'],['systemctl','mask','--now','ssh.service','ssh.socket']],'write_files':[{'path':'/usr/local/sbin/runnerloom-image-build','permissions':'0700','content':script}],'runcmd':[['bash','-c','exec /usr/local/sbin/runnerloom-image-build >/dev/ttyS0 2>&1']]}
+""".replace('__URL__',url).replace('__DIGEST__',digest).replace('__HARDENING__','\n'.join(hardening))
+config={'growpart':{'mode':'auto','devices':['/'],'ignore_growroot_disabled':False},'resize_rootfs':True,'ssh_pwauth':False,'disable_root':True,'bootcmd':[['systemctl','mask','--now','serial-getty@ttyS0.service'],['systemctl','mask','--now','ssh.service','ssh.socket']],'write_files':[{'path':'/usr/local/sbin/runnerloom-image-build','permissions':'0700','content':script},{'path':'/etc/runnerloom-image-policy.json','permissions':'0644','content':json.dumps(policy,indent=2,sort_keys=True)+'\n'}],'runcmd':[['bash','-c','exec /usr/local/sbin/runnerloom-image-build >/dev/ttyS0 2>&1']]}
 # JSON is valid YAML; the cloud-config header selects cloud-init's parser.
 (p/'build-user-data').write_text('#cloud-config\n'+json.dumps(config))
 (p/'build-meta-data').write_text('instance-id: runnerloom-image-builder\nlocal-hostname: runnerloom-image-builder\n')
@@ -135,7 +165,8 @@ import datetime,hashlib,json,os,pathlib,sys
 p=pathlib.Path(sys.argv[1]);out=pathlib.Path(sys.argv[2]);image=p/'golden.qcow2';h=hashlib.sha256()
 with image.open('rb') as f:
     for block in iter(lambda:f.read(8<<20),b''): h.update(block)
-manifest={'name':'ubuntu-24','digest':'sha256:'+h.hexdigest(),'minimumRootGiB':20,'runnerVersion':(p/'runner.version').read_text(),'runnerArchiveSHA256':(p/'runner.sha256').read_text(),'baseSHA256':(p/'base.sha256').read_text(),'builtAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),'os':'Ubuntu 24.04','architecture':'x86_64','contents':['git','python3','python3-venv','build-essential','GitHub Actions Runner'],'registered':False}
+policy_bytes=(p/'image-policy.json').read_bytes();policy=json.loads(policy_bytes)
+manifest={'name':'ubuntu-24','digest':'sha256:'+h.hexdigest(),'minimumRootGiB':20,'runnerVersion':(p/'runner.version').read_text(),'runnerArchiveSHA256':(p/'runner.sha256').read_text(),'baseSHA256':(p/'base.sha256').read_text(),'builtAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),'os':'Ubuntu 24.04','architecture':'x86_64','contents':['git','python3','python3-venv','build-essential','GitHub Actions Runner','RunnerLoom image policy'],'imagePolicy':policy,'imagePolicySHA256':'sha256:'+hashlib.sha256(policy_bytes).hexdigest(),'registered':False}
 # link() publishes without overwriting a destination created after validation.
 os.link(image,out);out.chmod(0o600)
 with open(str(out)+'.manifest.json','x') as f: json.dump(manifest,f,indent=2);f.flush();os.fsync(f.fileno())
