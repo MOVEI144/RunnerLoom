@@ -71,12 +71,13 @@ jobs:
           test -s acceptance-evidence/github-meta.json
           sleep 20
       - name: Upload standard acceptance evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: v1-standard-${{ matrix.slot }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: acceptance-evidence/
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
 
   large:
     name: Live large runner
@@ -115,12 +116,13 @@ jobs:
             https://api.github.com/meta -o acceptance-evidence/github-meta.json
           test -s acceptance-evidence/github-meta.json
       - name: Upload large-pool evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: v1-large-${{ github.run_id }}-${{ github.run_attempt }}
           path: acceptance-evidence/
           retention-days: 30
-          if-no-files-found: error
+          if-no-files-found: warn
 
   cancellation:
     name: External cancellation and cleanup probe
