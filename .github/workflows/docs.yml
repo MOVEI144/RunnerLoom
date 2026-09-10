@@ -1,0 +1,36 @@
+name: RunnerLoom documentation
+
+on:
+  pull_request:
+    paths:
+      - README.md
+      - docs/**
+      - scripts/check-docs.py
+      - .github/workflows/docs.yml
+  push:
+    branches: [main]
+    paths:
+      - README.md
+      - docs/**
+      - scripts/check-docs.py
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docs:
+    name: Reader paths and local links
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Validate reader-facing documentation
+        run: python3.12 scripts/check-docs.py
