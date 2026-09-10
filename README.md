@@ -70,11 +70,10 @@ jobs:
 1. CLIとホスト依存関係を入れる
 2. GitHub AppとRunner Groupを用意する
 3. Golden Imageを作る
-4. cluster.jsonでPoolと資源上限を決める
-5. setupで設定を保存する
-6. image importとnetwork applyを明示実行する
-7. github check後にController/Agentを起動する
-8. 手動Workflowを実行し、VM削除まで確認する
+4. setupでPoolと資源上限を決め、設定・CA・Node IDを保存する
+5. image importとnetwork applyを明示実行する
+6. github check後にController/Agentを起動する
+7. 手動Workflowを実行し、VM削除まで確認する
 ```
 
 コマンド、置換する値、各段階の成功条件は [1台構成セットアップ](docs/QUICKSTART.ja.md) にまとめています。
@@ -89,7 +88,7 @@ jobs:
 | `.deb` / archiveのインストール | CLIバイナリと文書を配置。サービス・ネットワークは起動しない |
 | `setup --apply` | 指定したstate directoryへ設定、CA、Node IDを保存 |
 | `image build` | 指定先へGolden Imageとmanifestを新規作成 |
-| `image import` | Node用イメージキャッシュへ検証済みイメージを登録 |
+| `image import` | Controllerの配布用Image cacheへ検証済みイメージを登録 |
 | `network apply` | RunnerLoom専用libvirt networkとfirewall規則を作成 |
 | `service install --start` | RunnerLoom用systemd unitを生成して起動 |
 | GitHub Job | 使い捨てVMと作業ディスクを作成し、完了後に所有確認して削除 |
