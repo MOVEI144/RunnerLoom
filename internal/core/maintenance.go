@@ -100,6 +100,14 @@ func maintenanceReport(ctx context.Context, q rowReader, policy MaintenancePolic
 	return report, nil
 }
 
+func maintenancePostCommitError(report MaintenanceReport, err error) error {
+	var fault *Error
+	if errors.As(err, &fault) {
+		return Fail(fault.Code, fault.Message, map[string]any{"report": report, "causeDetails": fault.Details})
+	}
+	return Fail("OPERATION_FAILED", err.Error(), report)
+}
+
 // Maintain retires only bounded, reconstructible controller bookkeeping:
 // expired plans, expired invitations that are not referenced by an enrollment,
 // and old audit rows beyond an operator-selected retained tail. It never deletes
@@ -144,20 +152,25 @@ func (s *Store) Maintain(ctx context.Context, policy MaintenancePolicy, apply bo
 	if err != nil {
 		return report, err
 	}
+	// The deletions and audit record are durable now. Later checkpoint, VACUUM,
+	// or accounting failures must not make the operation look unapplied.
+	report.Applied = true
 
 	var busy, logFrames, checkpointedFrames int
 	if err = s.DB.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointedFrames); err != nil {
-		return report, err
+		return report, maintenancePostCommitError(report, err)
 	}
 	if busy != 0 {
-		return report, Fail("MAINTENANCE_BUSY", "database checkpoint could not obtain exclusive access", map[string]int{"logFrames": logFrames, "checkpointedFrames": checkpointedFrames})
+		return report, maintenancePostCommitError(report, Fail("MAINTENANCE_BUSY", "database checkpoint could not obtain exclusive access", map[string]int{"logFrames": logFrames, "checkpointedFrames": checkpointedFrames}))
 	}
 	report.WALCheckpointComplete = true
 	if _, err = s.DB.ExecContext(ctx, "VACUUM"); err != nil {
-		return report, err
+		return report, maintenancePostCommitError(report, err)
 	}
 	report.VacuumComplete = true
-	report.Applied = true
 	report.DatabaseBytesAfter, err = s.databaseFootprint()
-	return report, err
+	if err != nil {
+		return report, maintenancePostCommitError(report, err)
+	}
+	return report, nil
 }
