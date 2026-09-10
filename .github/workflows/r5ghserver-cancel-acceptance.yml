@@ -1,0 +1,25 @@
+name: RunnerLoom live cancellation acceptance
+
+on:
+  push:
+    branches: [acceptance/r5ghserver-cancel-20260910]
+
+permissions:
+  contents: read
+
+jobs:
+  cancel:
+    name: Cancel an active ephemeral runner
+    runs-on: r5gh-linux-standard
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Wait for an external cancellation
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'runner=%s started=%s\n' "$RUNNER_NAME" "$(date -u +%FT%TZ)"
+          sleep 300
