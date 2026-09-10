@@ -42,7 +42,7 @@ cd "runnerloom-release-$tag"
 gh release download "$tag" --repo MOVEI144/RunnerLoom
 ```
 
-`gh`を使わない場合は、ブラウザから同じ4種類のassetを1つの空ディレクトリへ保存します。
+`gh`を使わない場合は、ブラウザから同じReleaseのassetを1つの空ディレクトリへ保存します。
 
 ### 2. checksumを確認する
 
@@ -157,11 +157,15 @@ Node名が異なる場合はunit名も置き換えてください。
 
 ### 3. offline backupを取る
 
+`backup --out`は既存ファイルを上書きしません。更新のたびに新しい名前を使います。
+
 ```bash
 sudo install -d -m 0700 /var/backups/runnerloom
+backup="/var/backups/runnerloom/controller-$(date -u +%Y%m%dT%H%M%SZ).db"
 sudo runnerloom backup \
   --state /var/lib/runnerloom/controller \
-  --out /var/backups/runnerloom/controller.db
+  --out "$backup"
+printf 'saved: %s\n' "$backup"
 ```
 
 DBだけでは完全な復旧backupになりません。次も別途、privateな保存先へ保全します。
