@@ -312,11 +312,11 @@ sudo runnerloom network check \
 
 ### 5-3. Image cacheとVM diskのfilesystemを確認する
 
-Nodeは読み取り専用base imageをhard linkでVM storageへ公開するため、Node image cacheとVM disk directoryは同じfilesystem上に必要です。
+Nodeは読み取り専用base imageをhard linkでVM storageへ公開するため、Node state（その下にimage cacheが作られます）とVM disk directoryは同じfilesystem上に必要です。
 
 ```bash
 sudo mkdir -p "$RL_DISK_DIR"
-findmnt -T "$RL_NODE_STATE/images"
+findmnt -T "$RL_NODE_STATE"
 findmnt -T "$RL_DISK_DIR"
 ```
 
@@ -352,7 +352,7 @@ sudo runnerloom service install \
 ```bash
 sudo runnerloom service install \
   --role agent \
-  --state "$RL_CONTROLLER_STATE" \
+  --state "$RL_NODE_STATE" \
   --config "$RL_NODE_STATE/agent.json" \
   --binary "$RL_BINARY" \
   --start
