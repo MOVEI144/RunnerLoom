@@ -29,7 +29,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          printf '%s  %s\n' '7075dda5a9e0dd20064ba64bc77206ad63e126dfc1bfa6ce6afefead6d0038d7' .github/internal/quarantine-toctou.patch | sha256sum --check -
+          printf '%s  %s\n' '7895d396617106a8db553edc8436501e7b5a6793d851f3e742af2f846470d9df' .github/internal/quarantine-toctou.patch | sha256sum --check -
           git apply --check .github/internal/quarantine-toctou.patch
           git apply .github/internal/quarantine-toctou.patch
           rm -f .github/internal/quarantine-toctou.patch

@@ -1,7 +1,7 @@
 diff --git a/internal/host/cache.go b/internal/host/cache.go
 --- a/internal/host/cache.go
 +++ b/internal/host/cache.go
-@@ -768,6 +768,19 @@ func (i *Images) quarantineDigestMismatch(path, digest string) (string, error) {
+@@ -768,6 +768,20 @@ func (i *Images) quarantineDigestMismatch(path, digest string) (string, error) {
  	if actual == digest {
  		return "", errors.New("refusing to quarantine an image whose digest now matches")
  	}
