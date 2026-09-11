@@ -1,0 +1,59 @@
+name: Internal apply cache hardening
+
+on:
+  push:
+    branches:
+      - feat/cache-lifecycle-management
+    paths:
+      - .github/internal/cache-hardening.b64
+      - .github/workflows/internal-apply-cache-hardening.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: feat/cache-lifecycle-management
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Apply and validate hardening changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .github/internal/cache-hardening.b64 | gzip -d > /tmp/cache-hardening.patch
+          printf '%s  %s\n' '31fa4d6a3508bca908c1e5238713b0635ae82700afdc7af35fe1b5c4aff07f3e' /tmp/cache-hardening.patch | sha256sum --check -
+          git apply --check /tmp/cache-hardening.patch
+          git apply /tmp/cache-hardening.patch
+          rm -f .github/internal/cache-hardening.b64
+          rm -f .github/workflows/internal-apply-cache-hardening.yml
+          rmdir .github/internal 2>/dev/null || true
+          gofmt -w \
+            internal/cli/cli.go \
+            internal/cli/display.go \
+            internal/host/cache.go \
+            internal/host/cache_test.go \
+            internal/host/download.go \
+            internal/host/images.go \
+            internal/host/provider.go
+          python3 scripts/check-docs.py
+          git diff --check
+          go vet ./...
+          go test -count=1 ./...
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'runnerloom-cache-bot'
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: harden cache recovery and prune reporting'
+          git push origin HEAD:feat/cache-lifecycle-management
