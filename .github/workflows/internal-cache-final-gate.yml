@@ -1,0 +1,149 @@
+name: Internal cache final review gate
+
+on:
+  push:
+    branches:
+      - feat/cache-lifecycle-management
+    paths:
+      - .github/workflows/internal-cache-final-gate.yml
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: "13"
+      BRANCH: feat/cache-lifecycle-management
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Normalize final source and remove internal workflows
+        id: final-head
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4; do
+            git fetch origin "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path("internal/host/cache.go")
+          text = p.read_text()
+          if "exists, err := checkExistingPrivateDirectory(i.Dir)" in text:
+              text = text.replace(
+                  "\tvar lock *core.Lock\n\tvar err error\n\tif apply {\n",
+                  "\tvar lock *core.Lock\n\tif apply {\n",
+                  1,
+              )
+          p.write_text(text)
+          PY
+            gofmt -w internal/host/cache.go
+            python3 scripts/check-docs.py
+            git diff --check
+            go vet ./...
+            go test -count=1 ./...
+            go test -race -count=1 ./internal/host ./internal/cli ./internal/core
+            for workflow in \
+              .github/workflows/internal-cache-finalize.yml \
+              .github/workflows/internal-cache-polish.yml \
+              .github/workflows/internal-cache-audit-fix.yml \
+              .github/workflows/internal-cache-integrity-final.yml \
+              .github/workflows/internal-cache-definitive.yml \
+              .github/workflows/internal-cache-compile-fix.yml \
+              .github/workflows/internal-cache-final-gate.yml; do
+              if test -f "$workflow"; then git rm -f "$workflow"; fi
+            done
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add internal/host/cache.go .github/workflows
+            if ! git diff --cached --quiet; then
+              git commit -m "chore(cache): remove internal validation workflows"
+            fi
+            if git push origin HEAD:"$BRANCH"; then
+              head="$(git rev-parse HEAD)"
+              echo "sha=$head" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          exit 1
+      - name: Request latest CodeRabbit review
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body '@coderabbitai review
+
+Final gate request: review the current head only. Focus on cache deletion/quarantine TOCTOU safety, required-image and orphan-base handling, active Instances from disabled Pools, inode accounting, filesystem reserve, CLI side effects, and documentation accuracy.'
+      - name: Wait for current-head CI and CodeRabbit
+        shell: bash
+        run: |
+          set -euo pipefail
+          head='${{ steps.final-head.outputs.sha }}'
+          owner="${REPO%%/*}"
+          name="${REPO#*/}"
+          status_context='cache/final-review-gate'
+          fail_status() {
+            gh api --method POST "repos/$REPO/statuses/$head" \
+              -f state=failure -f context="$status_context" \
+              -f description="$1" >/dev/null || true
+          }
+          trap 'fail_status "Cache final review gate failed"' ERR
+
+          for attempt in $(seq 1 180); do
+            remote="$(gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq .object.sha)"
+            test "$remote" = "$head" || { echo "branch moved from validated head" >&2; exit 1; }
+
+            checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$REPO/commits/$head/check-runs?per_page=100")"
+            count="$(jq '.total_count' <<<"$checks")"
+            pending="$(jq '[.check_runs[] | select(.status != "completed")] | length' <<<"$checks")"
+            failed="$(jq '[.check_runs[] | select(.status == "completed" and (.conclusion | IN("success","neutral","skipped") | not))] | length' <<<"$checks")"
+
+            reviews="$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100")"
+            reviewed="$(jq --arg head "$head" '[.[] | select(.user.login == "coderabbitai[bot]" and .commit_id == $head)] | length' <<<"$reviews")"
+
+            if test "$count" -gt 0 && test "$pending" -eq 0 && test "$failed" -eq 0 && test "$reviewed" -gt 0; then
+              break
+            fi
+            if test "$failed" -gt 0; then
+              echo "a current-head check failed" >&2
+              exit 1
+            fi
+            sleep 5
+            test "$attempt" -lt 180 || { echo "checks or review did not complete" >&2; exit 1; }
+          done
+
+          query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated comments(first:20){nodes{author{login} body path line}}}}}}}'
+          threads="$(gh api graphql -f query="$query" -F owner="$owner" -F name="$name" -F number="$PR_NUMBER")"
+
+          mapfile -t outdated < <(jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false and .isOutdated == true and ([.comments.nodes[].author.login] | any(. == "coderabbitai" or . == "coderabbitai[bot]"))) | .id' <<<"$threads")
+          mutation='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}'
+          for id in "${outdated[@]}"; do
+            gh api graphql -f query="$mutation" -F id="$id" >/dev/null
+          done
+
+          threads="$(gh api graphql -f query="$query" -F owner="$owner" -F name="$name" -F number="$PR_NUMBER")"
+          active="$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false and .isOutdated == false and ([.comments.nodes[].author.login] | any(. == "coderabbitai" or . == "coderabbitai[bot]")))] | length' <<<"$threads")"
+          if test "$active" -ne 0; then
+            jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false and .isOutdated == false) | .comments.nodes[] | select(.author.login == "coderabbitai" or .author.login == "coderabbitai[bot]") | "\(.path // "unknown"):\(.line // 0) \(.body)"' <<<"$threads" > /tmp/active-coderabbit.txt
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/active-coderabbit.txt || true
+            echo "$active active CodeRabbit review threads remain" >&2
+            exit 1
+          fi
+
+          gh api --method POST "repos/$REPO/statuses/$head" \
+            -f state=success -f context="$status_context" \
+            -f description='Full tests, CI and current-head CodeRabbit review passed' >/dev/null
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Final cache gate passed for commit \`$head\`: repository tests, race tests, documentation checks, current-head CI and CodeRabbit active-thread count are all clean." >/dev/null

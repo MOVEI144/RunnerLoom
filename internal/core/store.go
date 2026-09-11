@@ -708,7 +708,7 @@ func (s *Store) Sync(ctx context.Context, name string, o Observation) (response 
 		response.Images = []Image{}
 		imageSeen := map[string]bool{}
 		for _, p := range c.Pools {
-			if c.Eligible(p, n) {
+			if p.Enabled && c.Eligible(p, n) {
 				im, _ := c.Image(p.Image)
 				if !imageSeen[im.Digest] {
 					response.Images = append(response.Images, im)

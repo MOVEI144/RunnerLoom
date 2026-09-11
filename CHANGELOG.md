@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.0-rc.3
+
+Third Linux/amd64 CPU/LAN release candidate, focused on bounded Image cache lifecycle and clearer operations.
+
+- Add `cache status` for Controller and Node capacity, references, partial downloads, base hard links, verification and safe-prune readiness.
+- Add dry-run-first `cache prune`; applied cleanup requires the owning Controller/Agent to be stopped and rescans catalog, instance manifests and real qcow2 overlay backing paths under locks.
+- Keep active, stopping, unknown and currently catalogued Image digests protected; fail closed on unknown files, symlinks, malformed manifests or mismatched base links.
+- Add `cache seed` to hard-link a verified Controller Image into a same-filesystem Node cache for single-host deduplication, without silently copying across filesystems.
+- Resume interrupted authenticated Node Image downloads with digest-pinned ETag, `Range` and `If-Range`, then re-check the complete SHA-256 and qcow2 structure before atomic publication.
+- Count retained partials against cache limits and preserve a fixed 2 GiB filesystem safety reserve for new imports/downloads.
+- Preserve digest-mismatched completed cache files under explicit quarantine names before recovery; report and age-gate their later cleanup instead of overwriting diagnostic evidence.
+- Report partially applied prune operations with the exact removed paths, and block Node pruning when its approved VM storage is missing or cannot be reconciled.
+- Stop distributing Images used only by disabled Pools; non-deleted instances and real overlays continue to protect their exact digest.
+- Add a dedicated cache guide and regression coverage for dry runs, active references, unknown storage, service locks, hard-link accounting and resumed transfers.
+
+Automatic LRU eviction remains intentionally disabled: capacity pressure never overrides ownership or backing-image evidence.
+
 ## 0.1.0-rc.2
 
 Second Linux/amd64 CPU/LAN release candidate, focused on portability, Golden Image hardening and qualification evidence.

@@ -332,6 +332,19 @@ sudo runnerloom image import \
 
 `verified: true` と、`$RL_CONTROLLER_STATE/images/...qcow2`へのpathを確認します。
 
+ControllerとNodeが同じfilesystem上にある1台構成では、Agent起動前にNode cacheへhard linkして重複copyを避けられます。通常downloadを使う場合はこの操作を省略します。
+
+```bash
+sudo runnerloom cache seed "$RL_IMAGE_DIGEST" \
+  --config "$RL_NODE_STATE/agent.json" \
+  --source-state "$RL_CONTROLLER_STATE"
+
+sudo runnerloom cache status \
+  --config "$RL_NODE_STATE/agent.json"
+```
+
+別filesystemの場合、`cache seed`はcopyへfallbackせず失敗します。Agent起動後のmTLS downloadを使用してください。詳細は [Image cache管理](CACHE.ja.md) を参照してください。
+
 ### 5-2. network変更をplanしてからapplyする
 
 ```bash

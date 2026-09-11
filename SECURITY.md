@@ -25,7 +25,9 @@ Mutable VM disks are per-job. Backing images are SHA-256 verified and read-only.
 
 VM identifiers, metadata, paths and ownership are checked before destructive operations. Resource commitments survive unknown state and communication failure. A GitHub completion event does not prove that a host VM stopped. CPU/RAM are released only after host stop confirmation; disk capacity remains held until deletion confirmation.
 
-The current image cache deliberately does not auto-evict backing images that may still be in use. Plan space for images, logs, VM disks and SQLite history. A cache-capacity error is not automatically repaired by deleting user data.
+The image cache deliberately does not auto-evict backing images that may still be in use. `cache prune --apply` requires the owning service to be stopped and fails closed unless catalog, instance manifests, actual qcow2 overlay backing paths and base hard links can all be reconciled. Unknown files or malformed ownership evidence block deletion. Plan space for images, logs, VM disks and SQLite history; a cache-capacity error is not automatically repaired by deleting user data.
+
+Interrupted Node downloads use owner-only partial files and resume only against the same digest ETag and a consistent HTTP byte range. The complete file is SHA-256 and qcow2-structure checked before atomic publication. A completed entry with a mismatched digest is quarantined only when it has no other hard links; shared corruption requires stopped-service reconciliation so an active backing inode is never silently replaced. VM creation rechecks that the base path and verified Node cache are the same inode. `cache seed` is an explicit local-admin operation: it verifies the source and uses a hard link only on the same filesystem, never an implicit cross-filesystem copy.
 
 Diagnostic serial logs are bounded per VM, owner-only and may contain sensitive job output. Do not publish them blindly. Deleted files on ordinary storage are not a cryptographic secure erase; use encrypted storage when residual-data risks matter.
 

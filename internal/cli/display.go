@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/MOVEI144/RunnerLoom/internal/core"
+	"github.com/MOVEI144/RunnerLoom/internal/host"
 )
 
 // Human-readable tables are deliberately separate from the stable JSON output.
@@ -53,6 +54,53 @@ func humanOutput(w io.Writer, v any) (bool, error) {
 		if len(rows) == 0 {
 			line("実行記録はまだありません。")
 		}
+	case host.ImageCacheReport:
+		line("CACHE", rows.Scope, rows.CacheDir)
+		line("安全に整理可能", rows.SafeToPrune, "安全余裕 GiB", rows.SafetyReserveGiB)
+		line("使用量 bytes", rows.CacheBytes, "partial", rows.PartialBytes, "quarantine", rows.QuarantineBytes)
+		line("base-only bytes", rows.BaseOnlyBytes, "filesystem free bytes", rows.FilesystemFreeBytes)
+		line("新規Imageに使用可能 bytes", rows.AvailableForNewImageBytes)
+		line("KIND", "DIGEST", "BYTES", "保護", "検証", "BASE", "整理可否/理由")
+		for _, entry := range rows.Entries {
+			digest := entry.Digest
+			if len(digest) > 22 {
+				digest = digest[:19] + "..."
+			}
+			reason := strings.Join(entry.BlockedReasons, ",")
+			if entry.Reclaimable {
+				reason = "候補"
+			} else if reason == "" {
+				reason = "保留"
+			}
+			line(entry.Kind, digest, entry.SizeBytes, entry.Protected, entry.Verification, entry.BasePresent, reason)
+		}
+		for _, warning := range rows.Warnings {
+			line("警告", warning)
+		}
+	case host.ImageCachePruneReport:
+		line("CACHE整理", rows.Scope, "適用開始", rows.Applied, "完了", rows.Completed, "基準", rows.Cutoff.Local().Format(time.RFC3339))
+		line("安全に整理可能", rows.SafeToPrune, "安全余裕 GiB", rows.SafetyReserveGiB)
+		line("使用量 bytes", rows.CacheBytes, "partial", rows.PartialBytes, "quarantine", rows.QuarantineBytes)
+		line("base-only bytes", rows.BaseOnlyBytes, "filesystem free bytes", rows.FilesystemFreeBytes)
+		line("削除path数", len(rows.Removed), "論理bytes", rows.RemovedLogicalBytes, "物理解放見込みbytes", rows.ReclaimedBytes)
+		line("KIND", "DIGEST", "BYTES", "保護", "整理可否/理由")
+		for _, entry := range rows.Entries {
+			digest := entry.Digest
+			if len(digest) > 22 {
+				digest = digest[:19] + "..."
+			}
+			reason := strings.Join(entry.BlockedReasons, ",")
+			if entry.Reclaimable {
+				reason = "削除候補"
+			}
+			line(entry.Kind, digest, entry.SizeBytes, entry.Protected, reason)
+		}
+		for _, warning := range rows.Warnings {
+			line("警告", warning)
+		}
+	case host.ImageCacheSeedReport:
+		line("DIGEST", "BYTES", "重複排除", "既存", "保存先")
+		line(rows.Digest, rows.SizeBytes, rows.Deduplicated, rows.AlreadyThere, rows.Destination)
 	case map[string]core.Observation:
 		line("NODE", "受付状態", "最後の通信", "VM数")
 		names := make([]string, 0, len(rows))

@@ -28,6 +28,8 @@ type imageStamp struct {
 	Mod  int64
 }
 
+var errImageDigestMismatch = errors.New("image digest mismatch")
+
 func imageName(digest string) (string, error) {
 	if len(digest) != 71 || !strings.HasPrefix(digest, "sha256:") || strings.Trim(digest[7:], "0123456789abcdef") != "" {
 		return "", errors.New("image must have an exact SHA-256 digest")
@@ -90,7 +92,7 @@ func (i *Images) Verify(ctx context.Context, digest string) error {
 		return e
 	}
 	if actual != digest {
-		return errors.New("image digest mismatch")
+		return errImageDigestMismatch
 	}
 	if e = i.inspect(ctx, path); e != nil {
 		return e
@@ -155,29 +157,21 @@ func (i *Images) Import(ctx context.Context, r io.Reader, digest string) (string
 			return "", e
 		}
 		if actual != digest {
-			return "", errors.New("existing image has incorrect digest")
+			if _, e = i.quarantineDigestMismatch(path, digest); e != nil {
+				return "", fmt.Errorf("existing image has incorrect digest and could not be quarantined: %w", e)
+			}
+		} else {
+			return path, i.inspect(ctx, path)
 		}
-		return path, i.inspect(ctx, path)
 	} else if !os.IsNotExist(e) {
 		return "", e
 	}
-	entries, e := os.ReadDir(i.Dir)
+	available, e := cacheAvailableBytes(i.Dir, i.LimitGiB, 0)
 	if e != nil {
 		return "", e
 	}
-	used := int64(0)
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".qcow2") {
-			st, e := entry.Info()
-			if e != nil {
-				return "", e
-			}
-			used += st.Size()
-		}
-	}
-	available := i.LimitGiB*(1<<30) - used
 	if available <= 0 {
-		return "", errors.New("image cache capacity exhausted")
+		return "", errors.New("image cache capacity or filesystem safety reserve exhausted")
 	}
 	f, e := os.CreateTemp(i.Dir, ".import-")
 	if e != nil {

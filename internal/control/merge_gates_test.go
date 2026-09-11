@@ -67,3 +67,32 @@ func TestAuthorizedImagesUseSharedTransferDeadline(t *testing.T) {
 		})
 	}
 }
+
+func TestAuthorizedImageStreamSupportsDigestPinnedRangeResume(t *testing.T) {
+	l := newLab(t)
+	a, _ := l.node(t, "node-a", l.c.Nodes[0].Budget)
+	transport := a.Client.HTTP.Transport.(*http.Transport)
+	leaf, err := x509.ParseCertificate(transport.TLSClientConfig.Certificates[0].Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := strings.TrimPrefix(l.c.Images[0].Digest, "sha256:")
+	req := httptest.NewRequestWithContext(t.Context(), "GET", "https://controller/v1/images/"+digest, nil)
+	req.Header.Set("Range", "bytes=5-")
+	req.Header.Set("If-Range", `"`+l.c.Images[0].Digest+`"`)
+	req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}, VerifiedChains: [][]*x509.Certificate{{leaf}}}
+	w := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	control.New(l.s, l.ca, l.c.Name).Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusPartialContent {
+		t.Fatal("range resume was not accepted", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("ETag"); got != `"`+l.c.Images[0].Digest+`"` {
+		t.Fatal("digest ETag changed", got)
+	}
+	if got := w.Header().Get("Content-Range"); !strings.HasPrefix(got, "bytes 5-") {
+		t.Fatal("content range missing", got)
+	}
+	if w.Body.String() != string(l.image[5:]) {
+		t.Fatal("range body mismatch")
+	}
+}

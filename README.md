@@ -19,6 +19,7 @@
 | セットアップ中のエラーを解決したい | [TROUBLESHOOTING.ja.md](docs/TROUBLESHOOTING.ja.md) |
 | 2台目以降のNodeを追加したい | [MULTI_NODE.ja.md](docs/MULTI_NODE.ja.md) |
 | drain、停止、バックアップ、更新をしたい | [OPERATIONS.ja.md](docs/OPERATIONS.ja.md) |
+| Image cacheの容量確認・整理をしたい | [CACHE.ja.md](docs/CACHE.ja.md) |
 | 設計・安全性・検証境界を確認したい | [ARCHITECTURE.md](docs/ARCHITECTURE.md) / [SECURITY.md](SECURITY.md) / [VERIFICATION.md](docs/VERIFICATION.md) |
 
 ## 仕組み
@@ -89,6 +90,8 @@ jobs:
 | `setup --apply` | 指定したstate directoryへ設定、CA、Node IDを保存 |
 | `image build` | 指定先へGolden Imageとmanifestを新規作成 |
 | `image import` | Controllerの配布用Image cacheへ検証済みイメージを登録 |
+| `cache seed` | 同一filesystemのController/Node cacheを検証済みhard linkで共有 |
+| `cache prune --apply` | 所有service停止と再検査後、参照されない古いImage/partialだけを削除 |
 | `network apply` | RunnerLoom専用libvirt networkとfirewall規則を作成 |
 | `service install --start` | RunnerLoom用systemd unitを生成して起動 |
 | GitHub Job | 使い捨てVMと作業ディスクを作成し、完了後に所有確認して削除 |
@@ -103,6 +106,7 @@ RunnerLoomはインストールだけで既存ネットワークを書き換え�
 - Node承認、TLS 1.3、証明書更新、失効確認
 - libvirt/KVM、qcow2 overlay、cloud-init、所有権を確認したcleanup
 - Canonical署名とRunner digestを検証するGolden Image builder
+- 参照・overlayを再検査するdry-run-first cache prune、Range再開download、同一Host hard-link seed
 - LAN、ホスト管理面、peer VMへの到達を制限する専用NAT/firewall
 - 人間向けCLIと、`--json` / JSON Schemaによる自動化向けインターフェース
 

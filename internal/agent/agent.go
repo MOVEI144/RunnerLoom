@@ -373,15 +373,10 @@ func (a *Agent) download(ctx context.Context, im core.Image) error {
 	if e != nil {
 		return e
 	}
-	resp, e := httpClient.Do(r)
-	if e != nil {
-		return e
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("image source returned HTTP %d", resp.StatusCode)
-	}
-	_, e = a.Images.Import(ctx, resp.Body, im.Digest)
+	// Download performs the HTTP request itself so it can resume a retained
+	// partial with Range and If-Range while preserving this client's TLS and
+	// redirect policy.
+	_, e = a.Images.Download(ctx, &httpClient, r.URL.String(), im.Digest)
 	return e
 }
 func (a *Agent) Step(ctx context.Context) error {
