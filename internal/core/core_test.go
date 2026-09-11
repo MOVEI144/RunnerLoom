@@ -85,6 +85,25 @@ func TestValidationRejects(t *testing.T) {
 		})
 	}
 }
+
+func TestDisabledPoolImageIsNotDistributedToNode(t *testing.T) {
+	s, c := testStore(t)
+	for index := range c.Pools {
+		c.Pools[index].Enabled = false
+	}
+	plan, err := s.Plan(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Apply(ctx, plan.ID); err != nil {
+		t.Fatal(err)
+	}
+	reply := observe(t, s, c, 1)
+	if len(reply.Images) != 0 {
+		t.Fatalf("disabled Pool images were still distributed: %+v", reply.Images)
+	}
+}
+
 func TestHardReservation(t *testing.T) {
 	s, c := testStore(t)
 	observe(t, s, c, 1)

@@ -58,6 +58,12 @@ and old audit rows beyond a retained tail, then checkpoint and vacuum SQLite.
 It deliberately preserves instances, SDK inbox replay rows, enrollments,
 images, disks and unknown state. Age is not ownership or deletion proof.
 
+## Image cache lifecycle
+
+Cache tests cover content-addressed status, catalog and active-instance protection, real overlay backing-path protection, dry-run behavior, applied deletion under the Agent/Controller process lock, fail-closed handling of unknown storage, same-filesystem hard-link seed and physical-link accounting. HTTP tests interrupt an Image response, retain a partial, resume with `Range`/`If-Range`, and verify the final digest before publication. Controller tests verify authenticated range responses retain the digest ETag and the extended Image-transfer deadline.
+
+Applied cache pruning remains an operator action rather than an automatic pressure response. CI evidence does not prove that an arbitrary deployment has stopped every non-RunnerLoom process that might access its dedicated storage.
+
 ## Supported initial scope
 
 - Ubuntu 24.04 x86_64 hosts, CPU VMs, one Controller and one or more trusted LAN Nodes.

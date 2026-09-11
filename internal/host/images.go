@@ -161,23 +161,12 @@ func (i *Images) Import(ctx context.Context, r io.Reader, digest string) (string
 	} else if !os.IsNotExist(e) {
 		return "", e
 	}
-	entries, e := os.ReadDir(i.Dir)
+	available, e := cacheAvailableBytes(i.Dir, i.LimitGiB, 0)
 	if e != nil {
 		return "", e
 	}
-	used := int64(0)
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".qcow2") {
-			st, e := entry.Info()
-			if e != nil {
-				return "", e
-			}
-			used += st.Size()
-		}
-	}
-	available := i.LimitGiB*(1<<30) - used
 	if available <= 0 {
-		return "", errors.New("image cache capacity exhausted")
+		return "", errors.New("image cache capacity or filesystem safety reserve exhausted")
 	}
 	f, e := os.CreateTemp(i.Dir, ".import-")
 	if e != nil {

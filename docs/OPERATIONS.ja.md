@@ -160,6 +160,23 @@ sudo systemctl start "runnerloom-agent-$RL_NODE_NAME.service"
 
 復旧時は、古いControllerを確実にfenceし、Node上の実VMとDBの記録を照合してください。DBだけを戻して実行中VMを存在しなかったことにしないでください。
 
+## Image cacheの点検と整理
+
+通常の状態確認では、ControllerとNodeを分けて確認します。
+
+```bash
+sudo runnerloom cache status --state "$RL_CONTROLLER_STATE" --cache-gib 100
+sudo runnerloom cache status --config "$RL_NODE_CONFIG"
+```
+
+古いImageは自動削除されません。旧Poolを無効化し、実行中VMがなく、Nodeが新しいcatalogを受信した後でdry-runします。適用時は対象ControllerまたはAgentを停止します。
+
+```bash
+sudo runnerloom cache prune --config "$RL_NODE_CONFIG" --older-than 168h --json
+```
+
+参照検査、hard link、物理解放量、中断download、Controller側の整理は [CACHE.ja.md](CACHE.ja.md) を参照してください。
+
 ## Controller DBの安全な整理
 
 `maintenance compact`は、期限切れplan、期限切れかつ未参照の招待、保持数を超えた古いaudit rowだけを候補にします。Instance、SDK inbox、enrollment、Image、disk、unknown host stateは対象外です。

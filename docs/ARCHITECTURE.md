@@ -60,6 +60,10 @@ A privileged host Agent is an explicit trust boundary in this release. The Contr
 
 Golden images are standalone qcow2 files with exact digests. Per-job writable overlays are never promoted into new base images. The image builder verifies Canonical's signed checksums and the official runner release digest, installs the runner without registration, then removes machine/cloud-init/SSH identities. Logs and configuration are not hidden inside reusable images.
 
+Controller and Node caches are content-addressed by the complete SHA-256. Node downloads retain an owner-only partial and resume only when the Controller returns the same digest ETag and a consistent byte range. Publication remains atomic and requires a full-file hash plus standalone-qcow2 inspection.
+
+Cache retirement is a separate local administrative operation. Applied pruning takes the owning process lock, then rescans enabled-Pool demand, durable instances, Node catalog, instance manifests, actual overlay backing paths and cache/base inode relationships. Unknown state disables deletion. A same-host `cache seed` may share one immutable inode across Controller, Node and VM-base paths; removal reports logical paths separately from physical bytes that remain linked elsewhere.
+
 ## Configuration and operation
 
 `config plan` is a bounded, expiring declarative plan; `config apply` rejects revision conflicts. Omission retains existing resources. Active Pool resize/image changes and reductions below committed resources are rejected. Node enrollment can add a Node without disrupting the existing GitHub listener. GitHub binding or Pool changes require a controlled Controller restart.

@@ -271,6 +271,15 @@ sudo journalctl -u "runnerloom-agent-$RL_NODE_NAME.service" -n 200 --no-pager
 
 digestを架空の値へ変更したり、検証を飛ばしたfileを手動renameしたりしないでください。
 
+容量、partial、保護理由、base hard linkをまとめて確認できます。
+
+```bash
+sudo runnerloom cache status --state "$RL_CONTROLLER_STATE" --cache-gib 100
+sudo runnerloom cache status --config "$RL_NODE_CONFIG" --verify
+```
+
+`safeToPrune: false`なら警告を先に解消します。手動`rm`ではなく、[cache管理手順](CACHE.ja.md)のdry-run-first pruneを使用してください。
+
 ## 9. Image cacheとVM diskが別filesystem
 
 ### 症状

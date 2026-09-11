@@ -15,6 +15,7 @@ DOCS = (
     ROOT / "README.md",
     ROOT / "docs" / "README.md",
     ROOT / "docs" / "INSTALL.md",
+    ROOT / "docs" / "CACHE.ja.md",
     ROOT / "docs" / "QUICKSTART.ja.md",
     ROOT / "docs" / "MULTI_NODE.ja.md",
     ROOT / "docs" / "OPERATIONS.ja.md",

@@ -32,7 +32,7 @@ func TestHelpIncludesOperations(t *testing.T) {
 	if code != 0 {
 		t.Fatal(code)
 	}
-	for _, want := range []string{"controller run", "agent run", "config plan", "node approve", "network check", "smoke-vm"} {
+	for _, want := range []string{"controller run", "agent run", "config plan", "node approve", "network check", "cache status", "cache prune", "cache seed", "smoke-vm"} {
 		if !strings.Contains(out, want) {
 			t.Fatal("help does not expose", want)
 		}

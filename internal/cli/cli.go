@@ -546,6 +546,7 @@ func (a *App) Command() *cobra.Command {
 	_ = adopt.MarkFlagRequired("id")
 	a.addOperations(root)
 	a.addMaintenance(root)
+	a.addCache(root)
 	a.addSetup(root)
 	a.addService(root)
 	a.addSmoke(root)
@@ -571,7 +572,7 @@ func Run(ctx context.Context, args []string, in io.Reader, out, errout io.Writer
 			return 2
 		case "NODE_UNAUTHORIZED", "INVITE_INVALID":
 			return 4
-		case "NO_CAPACITY", "ALREADY_RUNNING", "REVISION_CONFLICT", "PLAN_EXPIRED":
+		case "NO_CAPACITY", "ALREADY_RUNNING", "REVISION_CONFLICT", "PLAN_EXPIRED", "CACHE_OWNER_RUNNING", "CACHE_UNSAFE":
 			return 5
 		}
 		if strings.Contains(e.Error(), "unknown flag") || strings.Contains(e.Error(), "required flag") {
