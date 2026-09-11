@@ -1,0 +1,84 @@
+name: Internal harden setup prompt
+
+on:
+  push:
+    branches: [feat/interactive-cli-rc4]
+    paths:
+      - .github/workflows/internal-harden-setup-prompt.yml
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feat/interactive-cli-rc4
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Sanitize the existing setup prompt
+        run: |
+          set -euo pipefail
+          git fetch origin feat/interactive-cli-rc4
+          git reset --hard origin/feat/interactive-cli-rc4
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('internal/cli/setup.go')
+          text = path.read_text(encoding='utf-8')
+          old = 'fmt.Fprintf(a.Err, "%s [%s]: ", label, fallback)'
+          new = 'fmt.Fprintf(a.Err, "%s [%s]: ", interactiveSafe(label), interactiveSafe(fallback))'
+          if old in text:
+              text = text.replace(old, new, 1)
+          if new not in text:
+              raise SystemExit('setup prompt hardening marker missing')
+          path.write_text(text, encoding='utf-8')
+
+          Path('internal/cli/setup_prompt_security_test.go').write_text(r'''package cli
+
+import (
+	"bufio"
+	"bytes"
+	"strings"
+	"testing"
+)
+
+func TestSetupPromptEscapesLabelAndFallback(t *testing.T) {
+	var out, errOut bytes.Buffer
+	a := &App{In: strings.NewReader("\n"), Out: &out, Err: &errOut}
+	value, err := a.prompt(bufio.NewReader(a.In), "unsafe\x1b[2J-label", "/tmp/unsafe\x1b[31m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value != "/tmp/unsafe\x1b[31m" {
+		t.Fatalf("fallback changed: %q", value)
+	}
+	if strings.ContainsRune(errOut.String(), '\x1b') {
+		t.Fatalf("terminal escape reached setup output: %q", errOut.String())
+	}
+}
+''', encoding='utf-8')
+          Path('.github/workflows/internal-harden-setup-prompt.yml').unlink()
+          PY
+          gofmt -w internal/cli/setup.go internal/cli/setup_prompt_security_test.go
+          go mod tidy
+      - name: Validate
+        run: |
+          set -euo pipefail
+          git diff --check
+          go vet ./...
+          go test -race -count=1 ./...
+      - name: Commit verified setup hardening
+        run: |
+          set -euo pipefail
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix(cli): sanitize the existing setup prompt'
+          git push origin HEAD:feat/interactive-cli-rc4

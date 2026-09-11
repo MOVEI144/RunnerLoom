@@ -1,0 +1,170 @@
+name: Internal unified interactive fix
+
+on:
+  push:
+    branches: [feat/interactive-cli-rc4]
+    paths:
+      - .github/workflows/internal-unified-interactive-fix.yml
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  unify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Cancel every superseded branch writer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          BRANCH: feat/interactive-cli-rc4
+        run: |
+          set -euo pipefail
+          gh run list --repo "$REPO" --branch "$BRANCH" --limit 100 --json databaseId,name,status \
+            | jq -r '.[] | select((.name | startswith("Internal ")) and .name != "Internal release interactive CLI rc4 v2" and .name != "Internal unified interactive fix" and (.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "waiting")) | .databaseId' \
+            | while read -r run_id; do
+                test -n "$run_id" && gh run cancel "$run_id" --repo "$REPO" || true
+              done
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feat/interactive-cli-rc4
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Apply all interactive fixes to the latest branch head
+        run: |
+          set -euo pipefail
+          git fetch origin feat/interactive-cli-rc4
+          git reset --hard origin/feat/interactive-cli-rc4
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('.')
+          cli = root / 'internal/cli/cli.go'
+          interactive = root / 'internal/cli/interactive.go'
+          tests = root / 'internal/cli/interactive_test.go'
+          setup = root / 'internal/cli/setup.go'
+          script = root / 'scripts/apply-interactive-rc4.py'
+
+          required = [interactive, tests, root / 'internal/cli/interactive_path_test.go', root / 'internal/cli/interactive_security_gate_test.go', root / 'internal/cli/setup_prompt_security_gate_test.go', root / 'docs/INTERACTIVE_CLI.ja.md']
+          for path in required:
+              if not path.is_file():
+                  raise SystemExit(f'missing required file: {path}')
+
+          if script.is_file() and 'a.addInteractive(root)' not in cli.read_text(encoding='utf-8'):
+              scope = {'__name__': '__main__', '__file__': str(script)}
+              exec(compile(script.read_text(encoding='utf-8'), str(script), 'exec'), scope)
+
+          text = cli.read_text(encoding='utf-8')
+          old_root = '\troot.RunE = func(c *cobra.Command, _ []string) error { return c.Help() }\n'
+          new_root = ('\ta.addInteractive(root)\n'
+                      '\troot.RunE = func(c *cobra.Command, _ []string) error {\n'
+                      '\t\tif a.shouldStartInteractive() {\n'
+                      '\t\t\treturn a.runInteractive(c.Context())\n'
+                      '\t\t}\n'
+                      '\t\treturn c.Help()\n'
+                      '\t}\n')
+          if 'a.addInteractive(root)' not in text:
+              if old_root not in text:
+                  raise SystemExit('root integration marker missing')
+              text = text.replace(old_root, new_root, 1)
+          cli.write_text(text, encoding='utf-8')
+
+          text = interactive.read_text(encoding='utf-8')
+          old_dispatch = ('\tif !containsStateFlag(args) {\n'
+                          '\t\tfull = append(full, "--state", a.State)\n'
+                          '\t}\n'
+                          '\tfull = append(full, args...)\n')
+          new_dispatch = ('\tif !containsStateFlag(args) {\n'
+                          '\t\tfull = append(full, "--state", a.State)\n'
+                          '\t}\n'
+                          '\tif !allowPrompts {\n'
+                          '\t\tfull = append(full, "--non-interactive")\n'
+                          '\t}\n'
+                          '\tfull = append(full, args...)\n')
+          if old_dispatch in text:
+              text = text.replace(old_dispatch, new_dispatch, 1)
+          if new_dispatch not in text:
+              raise SystemExit('nested dispatch hardening missing')
+
+          replacements = {
+              'fmt.Fprintf(a.Err, "%s: ", label)': 'fmt.Fprintf(a.Err, "%s: ", interactiveSafe(label))',
+              'fmt.Fprintf(a.Err, "%s [%s]: ", label, interactiveSafe(fallback))': 'fmt.Fprintf(a.Err, "%s [%s]: ", interactiveSafe(label), interactiveSafe(fallback))',
+              'fmt.Fprintf(a.Err, "\\n%s\\n", title)': 'fmt.Fprintf(a.Err, "\\n%s\\n", interactiveSafe(title))',
+              'fmt.Fprintf(a.Err, "  %s. %s\\n", item.Key, item.Label)': 'fmt.Fprintf(a.Err, "  %s. %s\\n", interactiveSafe(item.Key), interactiveSafe(item.Label))',
+              'fmt.Fprintf(a.Err, "\\n%s\\n", summary)': 'fmt.Fprintf(a.Err, "\\n%s\\n", interactiveSafe(summary))',
+          }
+          for old, new in replacements.items():
+              text = text.replace(old, new)
+
+          duration_marker = 'func (a *App) interactiveDuration(label string, fallback time.Duration, minimum, maximum time.Duration) (time.Duration, error) {\n'
+          id_helper = '''func (a *App) interactiveID(label string) (string, error) {\n\tfor {\n\t\tvalue, err := a.interactiveRequired(label, "")\n\t\tif err != nil {\n\t\t\treturn "", err\n\t\t}\n\t\tif core.ValidID(value) {\n\t\t\treturn value, nil\n\t\t}\n\t\t_, _ = fmt.Fprintln(a.Err, "32桁の小文字16進数IDを入力してください。")\n\t}\n}\n\n'''
+          if 'func (a *App) interactiveID(' not in text:
+              if duration_marker not in text:
+                  raise SystemExit('ID helper insertion marker missing')
+              text = text.replace(duration_marker, id_helper + duration_marker, 1)
+          text = text.replace('id, promptErr := a.interactiveRequired("承認する申請ID", "")', 'id, promptErr := a.interactiveID("承認する申請ID")', 1)
+          for marker in ('interactiveSafe(label)', 'interactiveSafe(summary)', 'func (a *App) interactiveID(', 'a.interactiveID("承認する申請ID")'):
+              if marker not in text:
+                  raise SystemExit(f'missing interactive hardening marker: {marker}')
+          interactive.write_text(text, encoding='utf-8')
+
+          text = tests.read_text(encoding='utf-8')
+          if '"errors"' not in text:
+              text = text.replace('\t"context"\n', '\t"context"\n\t"errors"\n', 1)
+          text = text.replace('if err == nil || err.Error() != "boom" {', 'if !errors.Is(err, io.ErrUnexpectedEOF) {', 1)
+          if '!errors.Is(err, io.ErrUnexpectedEOF)' not in text:
+              raise SystemExit('reader error assertion missing')
+          tests.write_text(text, encoding='utf-8')
+
+          text = setup.read_text(encoding='utf-8')
+          text = text.replace('fmt.Fprintf(a.Err, "%s [%s]: ", label, fallback)', 'fmt.Fprintf(a.Err, "%s [%s]: ", interactiveSafe(label), interactiveSafe(fallback))', 1)
+          if 'interactiveSafe(label), interactiveSafe(fallback)' not in text:
+              raise SystemExit('legacy setup prompt hardening missing')
+          setup.write_text(text, encoding='utf-8')
+
+          (root / 'VERSION').write_text('0.1.0-rc.4\n', encoding='utf-8')
+
+          temporary = [
+              '.github/workflows/internal-source-export.yml',
+              '.github/workflows/internal-apply-interactive-rc4.yml',
+              '.github/workflows/internal-finalize-interactive-rc4.yml',
+              '.github/workflows/internal-finalize-interactive-rc4-v2.yml',
+              '.github/workflows/internal-fix-interactive-dispatch.yml',
+              '.github/workflows/internal-harden-interactive-input.yml',
+              '.github/workflows/internal-harden-setup-prompt.yml',
+              '.github/workflows/internal-ensure-setup-prompt.yml',
+              '.github/workflows/internal-unblock-interactive-rc4.yml',
+              '.github/workflows/internal-release-interactive-rc4.yml',
+              '.github/workflows/internal-unified-interactive-fix.yml',
+              'scripts/apply-interactive-rc4.py',
+          ]
+          for name in temporary:
+              (root / name).unlink(missing_ok=True)
+          PY
+          gofmt -w internal/cli/cli.go internal/cli/setup.go internal/cli/interactive*.go internal/cli/setup_prompt_security_gate_test.go
+          go mod tidy
+      - name: Run the full clean-tree verification
+        run: |
+          set -euo pipefail
+          python3 scripts/check-docs.py
+          git diff --check
+          grep -F 'a.addInteractive(root)' internal/cli/cli.go
+          grep -F 'full = append(full, "--non-interactive")' internal/cli/interactive.go
+          grep -F 'interactiveSafe(label), interactiveSafe(fallback)' internal/cli/setup.go
+          grep -Fx '0.1.0-rc.4' VERSION
+          ! find .github/workflows scripts -type f \( -name 'internal-*interactive*' -o -name 'apply-interactive-rc4.py' \) -print -quit | grep .
+          go vet ./...
+          go test -race -count=1 ./...
+      - name: Push the only verified writer commit
+        run: |
+          set -euo pipefail
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'feat(cli): consolidate and harden interactive operator mode'
+          git push origin HEAD:feat/interactive-cli-rc4
