@@ -1,0 +1,184 @@
+name: Internal cache implementation polish
+
+on:
+  push:
+    branches:
+      - feat/cache-lifecycle-management
+    paths:
+      - .github/workflows/internal-cache-polish.yml
+
+permissions:
+  contents: write
+
+jobs:
+  polish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Apply idempotent cache lifecycle polish
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_if_old(path: str, old: str, new: str) -> None:
+              p = Path(path)
+              text = p.read_text()
+              if new in text:
+                  return
+              if old not in text:
+                  raise SystemExit(f"neither old nor new block found in {path}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_if_old(
+              "internal/host/images.go",
+              "type Images struct {\n\tDir      string\n\tLimitGiB int64\n\tExec     Executor",
+              "type Images struct {\n\tDir        string\n\tLimitGiB   int64\n\tReserveGiB int64\n\tExec       Executor",
+          )
+          replace_if_old(
+              "internal/host/images.go",
+              "\tif i.LimitGiB < 1 || i.LimitGiB > 1048576 {\n\t\treturn \"\", errors.New(\"invalid image cache limit\")\n\t}",
+              "\tif e = validateCachePolicy(i.effectiveCacheLimitGiB(), i.effectiveCacheReserveGiB()); e != nil {\n\t\treturn \"\", e\n\t}",
+          )
+          replace_if_old(
+              "internal/host/images.go",
+              "\tavailable := i.LimitGiB*(1<<30) - used\n\tif available <= 0 {\n\t\treturn \"\", errors.New(\"image cache capacity exhausted\")\n\t}",
+              "\tavailable, e := i.importBudgetBytes(used)\n\tif e != nil {\n\t\treturn \"\", e\n\t}",
+          )
+          replace_if_old(
+              "internal/cli/cli.go",
+              "\ta.addMaintenance(root)\n\ta.addSetup(root)",
+              "\ta.addMaintenance(root)\n\ta.addCache(root)\n\ta.addSetup(root)",
+          )
+
+          test_file = Path("internal/host/cache_test.go")
+          test_text = test_file.read_text()
+          if '"encoding/json"' not in test_text:
+              test_text = test_text.replace('"context"\n', '"context"\n\t"encoding/json"\n', 1)
+              test_file.write_text(test_text)
+
+          cli = Path("internal/cli/cache.go")
+          cli_text = cli.read_text()
+          old = '''\trequired := map[string][]string{}\n\tfor _, image := range config.Images {\n\t\trequired[image.Digest] = append(required[image.Digest], "config:"+image.Name)\n\t}\n'''
+          new = '''\trequired := map[string][]string{}\n\tfor _, pool := range config.Pools {\n\t\tif !pool.Enabled {\n\t\t\tcontinue\n\t\t}\n\t\timage, ok := config.Image(pool.Image)\n\t\tif ok {\n\t\t\trequired[image.Digest] = append(required[image.Digest], "pool:"+pool.Name)\n\t\t}\n\t}\n'''
+          if new not in cli_text:
+              if old not in cli_text:
+                  raise SystemExit("controller cache reference block not found")
+              cli.write_text(cli_text.replace(old, new, 1))
+
+          store = Path("internal/core/store.go")
+          store_text = store.read_text()
+          old = '''\t\tfor _, p := range c.Pools {\n\t\t\tif c.Eligible(p, n) {\n\t\t\t\tim, _ := c.Image(p.Image)\n'''
+          new = '''\t\tfor _, p := range c.Pools {\n\t\t\tif p.Enabled && c.Eligible(p, n) {\n\t\t\t\tim, _ := c.Image(p.Image)\n'''
+          if new not in store_text:
+              if store_text.count(old) != 1:
+                  raise SystemExit("node catalog enabled-pool block not found")
+              store.write_text(store_text.replace(old, new, 1))
+
+          cache = Path("internal/host/cache.go")
+          cache_text = cache.read_text()
+          helper = '''func managedUniqueAllocatedBytes(roots ...string) (int64, error) {\n\tseen := map[string]bool{}\n\tvar total int64\n\tfor _, root := range roots {\n\t\tif root == "" {\n\t\t\tcontinue\n\t\t}\n\t\terr := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {\n\t\t\tif walkErr != nil {\n\t\t\t\tif os.IsNotExist(walkErr) {\n\t\t\t\t\treturn nil\n\t\t\t\t}\n\t\t\t\treturn walkErr\n\t\t\t}\n\t\t\tif entry.Type()&os.ModeSymlink != 0 {\n\t\t\t\treturn fmt.Errorf("symlink in managed cache/storage tree: %s", path)\n\t\t\t}\n\t\t\tif entry.IsDir() {\n\t\t\t\treturn nil\n\t\t\t}\n\t\t\tinfo, err := entry.Info()\n\t\t\tif err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t\tif !info.Mode().IsRegular() {\n\t\t\t\treturn nil\n\t\t\t}\n\t\t\t_, allocated := cacheFileUsage(info)\n\t\t\tkey := path\n\t\t\tif raw, ok := info.Sys().(*syscall.Stat_t); ok {\n\t\t\t\tkey = fmt.Sprintf("%d:%d", uint64(raw.Dev), uint64(raw.Ino))\n\t\t\t}\n\t\t\tif !seen[key] {\n\t\t\t\tseen[key] = true\n\t\t\t\ttotal += allocated\n\t\t\t}\n\t\t\treturn nil\n\t\t})\n\t\tif err != nil && !os.IsNotExist(err) {\n\t\t\treturn 0, err\n\t\t}\n\t}\n\treturn total, nil\n}\n\n'''
+          marker = "func syncDirectory(path string) error {\n"
+          if "func managedUniqueAllocatedBytes(" not in cache_text:
+              if marker not in cache_text:
+                  raise SystemExit("managed storage helper marker missing")
+              cache_text = cache_text.replace(marker, helper + marker, 1)
+          old_tail = '''\treport.ImportHeadroomBytes = min(logical, physical)\n\treport.Healthy = report.InvalidEntries == 0 && report.UnsafeEntries == 0\n\treturn report, nil\n'''
+          new_tail = '''\treport.ImportHeadroomBytes = min(logical, physical)\n\treport.ManagedUniqueBytes, err = managedUniqueAllocatedBytes(i.Dir, options.DiskDir)\n\tif err != nil {\n\t\treturn report, err\n\t}\n\treport.Healthy = report.InvalidEntries == 0 && report.UnsafeEntries == 0\n\treturn report, nil\n'''
+          if new_tail not in cache_text:
+              if old_tail not in cache_text:
+                  raise SystemExit("cache status tail marker missing")
+              cache_text = cache_text.replace(old_tail, new_tail, 1)
+          cache.write_text(cache_text)
+
+          core_test = Path("internal/core/cache_catalog_test.go")
+          if not core_test.exists():
+              core_test.write_text('''package core\n\nimport (\n\t"context"\n\t"strings"\n\t"testing"\n)\n\nfunc TestNodeCatalogExcludesDisabledPoolImages(t *testing.T) {\n\tstore, err := OpenStore(t.TempDir())\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tdefer store.Close()\n\tconfig := Example()\n\tdisabledDigest := "sha256:" + strings.Repeat("b", 64)\n\tconfig.Images = append(config.Images, Image{Name: "disabled-image", Digest: disabledDigest, MinimumRootGiB: 20})\n\tconfig.Pools[1].Image = "disabled-image"\n\tconfig.Pools[1].Enabled = false\n\tplan, err := store.Plan(context.Background(), config)\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif _, err = store.Apply(context.Background(), plan.ID); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tobservation := Observation{Node: "node-a", BootID: "boot", Sequence: 1, Ready: true, Isolation: true, Ceiling: config.Nodes[0].LocalCeiling, FreeDiskGiB: 500, Digests: []string{}, Instances: []VMReport{}}\n\tresponse, err := store.Sync(context.Background(), "node-a", observation)\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tfor _, image := range response.Images {\n\t\tif image.Digest == disabledDigest {\n\t\t\tt.Fatal("disabled Pool image remained in the Node catalog")\n\t\t}\n\t}\n\tif len(response.Images) != 1 || response.Images[0].Digest != config.Images[0].Digest {\n\t\tt.Fatalf("unexpected enabled image catalog: %+v", response.Images)\n\t}\n}\n''')
+
+          host_test = Path("internal/host/cache_test.go")
+          host_text = host_test.read_text()
+          if "TestCacheManagedBytesDeduplicateBaseLink" not in host_text:
+              host_text += '''\nfunc TestCacheManagedBytesDeduplicateBaseLinkAndIncludeVMFiles(t *testing.T) {\n\troot := t.TempDir()\n\tstate := filepath.Join(root, "state")\n\tdisk := filepath.Join(root, "disk")\n\tif err := core.PrivateDir(state); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif err := os.MkdirAll(filepath.Join(disk, "base"), 0700); err != nil {\n\t\tt.Fatal(err)\n\t}\n\timages := &Images{Dir: filepath.Join(state, "images"), LimitGiB: 1, ReserveGiB: 1, Exec: &fakeHost{}}\n\tdigest, cachePath := importCacheFixture(t, images, "UNIQUE_BYTES")\n\tbasePath := filepath.Join(disk, "base", strings.TrimPrefix(digest, "sha256:")+".qcow2")\n\tif err := os.Link(cachePath, basePath); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tfirst, err := images.CacheStatus(context.Background(), CacheScanOptions{StateDir: state, DiskDir: disk, Verify: true})\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif first.ManagedUniqueBytes != first.AllocatedBytes {\n\t\tt.Fatalf("base hard link was counted twice: managed=%d cache=%d", first.ManagedUniqueBytes, first.AllocatedBytes)\n\t}\n\tvmDir := filepath.Join(disk, "unrelated-owned-vm")\n\tif err = os.MkdirAll(vmDir, 0700); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif err = os.WriteFile(filepath.Join(vmDir, "scratch.qcow2"), make([]byte, 8192), 0600); err != nil {\n\t\tt.Fatal(err)\n\t}\n\tsecond, err := images.CacheStatus(context.Background(), CacheScanOptions{StateDir: state, DiskDir: disk, Verify: true})\n\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tif second.ManagedUniqueBytes <= first.ManagedUniqueBytes {\n\t\tt.Fatal("VM storage bytes were not included in aggregate managed usage")\n\t}\n}\n'''
+              host_test.write_text(host_text)
+
+          cache_doc = Path("docs/CACHE_MANAGEMENT.ja.md")
+          cache_doc_text = cache_doc.read_text()
+          cache_doc_text = cache_doc_text.replace(
+              "`cache status`では、cache使用量と実filesystemの空き、次のimportに使用できる小さい方のheadroomを表示します。",
+              "`cache status`では、cache使用量、NodeのVM storageをhard linkで重複計上しないaggregate使用量、実filesystemの空き、次のimportに使用できる小さい方のheadroomを表示します。",
+          )
+          cache_doc.write_text(cache_doc_text)
+
+          checker = Path("scripts/check-docs.py")
+          checker_text = checker.read_text()
+          cache_line = '    ROOT / "docs" / "CACHE_MANAGEMENT.ja.md",\n'
+          if cache_line not in checker_text:
+              marker = '    ROOT / "docs" / "TROUBLESHOOTING.ja.md",\n'
+              if marker in checker_text:
+                  checker_text = checker_text.replace(marker, marker + cache_line, 1)
+              else:
+                  raise SystemExit("cannot add cache guide to documentation checker")
+              checker.write_text(checker_text)
+
+          version = Path("VERSION")
+          version.write_text("0.1.0-rc.3\n")
+          changelog = Path("CHANGELOG.md")
+          change_text = changelog.read_text()
+          if "## 0.1.0-rc.3" not in change_text:
+              marker = "# Changelog\n"
+              entry = '''# Changelog\n\n## 0.1.0-rc.3 - 2026-09-11\n\n### Added\n\n- Safe Golden Image cache status, full verification, dry-run pruning and explicit corruption quarantine.\n- Cross-checks for enabled Pool references, Node catalogs, VM manifests, base hard links and real qcow2 backing references.\n- Aggregate cache/VM-storage usage without double-counting hard links, plus a physical filesystem reserve during imports.\n- Cache lifecycle documentation and regression tests.\n\n### Safety\n\n- Mutating cache operations require an offline Controller/Agent process lock and repeat integrity and inode checks immediately before removal.\n- Unknown files, active/unknown VM state, unexpected hard links and invalid storage metadata remain protected.\n'''
+              if marker not in change_text:
+                  raise SystemExit("CHANGELOG heading missing")
+              changelog.write_text(change_text.replace(marker, entry, 1))
+          PY
+
+          # Ensure reader-facing documentation links to the cache guide even if
+          # an earlier finalize run stopped before the documentation phase.
+          python3 - <<'PY'
+          from pathlib import Path
+          patches = [
+              ("README.md", "## 安全性と対応範囲\n", "## Image cacheの管理\n\nGolden Image cacheの容量、完全検証、安全なdry-run prune、破損時のquarantineは [cache管理ガイド](docs/CACHE_MANAGEMENT.ja.md) を参照してください。\n\n## 安全性と対応範囲\n"),
+              ("docs/README.md", "\n## 設計・安全性・検証\n", "\n## Cacheと容量\n\nGolden Imageの保存場所、容量、prune、quarantine: [CACHE_MANAGEMENT.ja.md](CACHE_MANAGEMENT.ja.md)\n\n## 設計・安全性・検証\n"),
+          ]
+          for name, marker, replacement in patches:
+              p = Path(name)
+              text = p.read_text()
+              if "CACHE_MANAGEMENT.ja.md" in text:
+                  continue
+              if marker in text:
+                  p.write_text(text.replace(marker, replacement, 1))
+              else:
+                  p.write_text(text + "\n\nCache管理: [CACHE_MANAGEMENT.ja.md](CACHE_MANAGEMENT.ja.md)\n")
+          PY
+
+          gofmt -w internal/host/cache.go internal/host/cache_test.go internal/host/images.go internal/cli/cache.go internal/cli/cache_command_test.go internal/cli/cli.go internal/core/cache_catalog_test.go internal/core/store.go
+          python3 scripts/check-docs.py
+          git diff --check
+      - name: Validate cache lifecycle implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test -count=1 ./...
+          go test -race -count=1 ./internal/host ./internal/cli ./internal/core
+      - name: Commit validated result and remove internal workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm -f .github/workflows/internal-cache-polish.yml
+          if test -f .github/workflows/internal-cache-finalize.yml; then
+            git rm -f .github/workflows/internal-cache-finalize.yml
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md CHANGELOG.md VERSION docs scripts internal .github/workflows
+          git commit -m "feat(cache): complete safe cache lifecycle management"
+          git push origin HEAD:feat/cache-lifecycle-management
