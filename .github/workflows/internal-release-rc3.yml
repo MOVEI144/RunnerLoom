@@ -1,0 +1,173 @@
+name: Internal RunnerLoom v0.1.0-rc.3 release gate
+
+on:
+  push:
+    branches:
+      - feat/cache-lifecycle-management
+    paths:
+      - .github/workflows/internal-release-rc3.yml
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  pull-requests: write
+  statuses: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: "13"
+      TAG: v0.1.0-rc.3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Resolve or complete the reviewed merge
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          merged="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .merged)"
+          if test "$merged" != true; then
+            for attempt in $(seq 1 180); do
+              head="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .head.sha)"
+              gate="$(gh api "repos/$REPO/commits/$head/status" --jq '[.statuses[] | select(.context == "cache/final-review-gate" and .state == "success")] | length')"
+              checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$REPO/commits/$head/check-runs?per_page=100")"
+              pending="$(jq '[.check_runs[] | select(.status != "completed")] | length' <<<"$checks")"
+              failed="$(jq '[.check_runs[] | select(.status == "completed" and (.conclusion | IN("success","neutral","skipped") | not))] | length' <<<"$checks")"
+              if test "$failed" -gt 0; then
+                echo "a required current-head check failed" >&2
+                exit 1
+              fi
+              if test "$gate" -gt 0 && test "$pending" -eq 0; then
+                response="$(gh api --method PUT "repos/$REPO/pulls/$PR_NUMBER/merge" \
+                  -f merge_method=merge \
+                  -f sha="$head" \
+                  -f commit_title='feat(cache): add safe Golden Image cache lifecycle management (#13)' \
+                  -f commit_message='Add cache status, integrity verification, dry-run pruning, explicit quarantine, physical reserve, active-reference protection, documentation and regression coverage for v0.1.0-rc.3.')" || true
+                if test "$(jq -r '.merged // false' <<<"$response")" = true; then
+                  break
+                fi
+              fi
+              sleep 5
+              test "$attempt" -lt 180 || { echo "reviewed PR did not become mergeable" >&2; exit 1; }
+            done
+          fi
+          merge_sha="$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq .merge_commit_sha)"
+          test -n "$merge_sha" && test "$merge_sha" != null
+          echo "sha=$merge_sha" >> "$GITHUB_OUTPUT"
+      - name: Check out merged main source
+        shell: bash
+        run: |
+          set -euo pipefail
+          merge_sha='${{ steps.merge.outputs.sha }}'
+          for attempt in $(seq 1 60); do
+            git fetch origin main --tags
+            main_sha="$(git rev-parse origin/main)"
+            if test "$main_sha" = "$merge_sha"; then break; fi
+            sleep 5
+            test "$attempt" -lt 60 || { echo "main does not point at the PR merge" >&2; exit 1; }
+          done
+          git checkout --detach "$merge_sha"
+          test "$(cat VERSION)" = "0.1.0-rc.3"
+          test ! -e .github/workflows/internal-cache-finalize.yml
+          test ! -e .github/workflows/internal-cache-polish.yml
+          test ! -e .github/workflows/internal-cache-audit-fix.yml
+          test ! -e .github/workflows/internal-cache-integrity-final.yml
+          test ! -e .github/workflows/internal-cache-definitive.yml
+          test ! -e .github/workflows/internal-cache-compile-fix.yml
+          test ! -e .github/workflows/internal-cache-final-gate.yml
+          test ! -e .github/workflows/internal-release-rc3.yml
+      - name: Independently validate merged source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check-docs.py
+          git diff --check
+          go vet ./...
+          go test -count=1 ./...
+          go test -race -count=1 ./internal/host ./internal/cli ./internal/core
+      - name: Require successful main checks when present
+        shell: bash
+        run: |
+          set -euo pipefail
+          merge_sha='${{ steps.merge.outputs.sha }}'
+          seen=0
+          for attempt in $(seq 1 180); do
+            runs="$(gh api "repos/$REPO/actions/runs?head_sha=$merge_sha&event=push&per_page=100")"
+            seen="$(jq '.total_count' <<<"$runs")"
+            pending="$(jq '[.workflow_runs[] | select(.status != "completed")] | length' <<<"$runs")"
+            failed="$(jq '[.workflow_runs[] | select(.status == "completed" and (.conclusion | IN("success","neutral","skipped") | not))] | length' <<<"$runs")"
+            if test "$failed" -gt 0; then
+              echo "a main workflow failed" >&2
+              exit 1
+            fi
+            if test "$seen" -gt 0 && test "$pending" -eq 0; then
+              break
+            fi
+            # A merge performed with GITHUB_TOKEN may intentionally suppress a
+            # recursive push workflow. The independent validation above remains
+            # mandatory; after two minutes, absence of main runs is acceptable.
+            if test "$attempt" -ge 24 && test "$seen" -eq 0; then
+              break
+            fi
+            sleep 5
+            test "$attempt" -lt 180 || { echo "main workflows did not complete" >&2; exit 1; }
+          done
+      - name: Build and verify release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          python3 scripts/package.py --out dist --deb
+          (cd dist && sha256sum --check SHA256SUMS)
+          test -f dist/runnerloom-0.1.0-rc.3-linux-amd64.tar.gz
+          test -f 'dist/runnerloom_0.1.0~rc.3_amd64.deb'
+          test -f dist/runnerloom-0.1.0-rc.3-buildinfo.json
+      - name: Publish verified release
+        shell: bash
+        run: |
+          set -euo pipefail
+          merge_sha='${{ steps.merge.outputs.sha }}'
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            existing="$(gh release view "$TAG" --repo "$REPO" --json isDraft,isPrerelease,targetCommitish,assets)"
+            test "$(jq -r .isDraft <<<"$existing")" = false
+            test "$(jq -r .isPrerelease <<<"$existing")" = true
+            test "$(jq '.assets | length' <<<"$existing")" -ge 4
+          else
+            cat > /tmp/release-notes.md <<'EOF'
+          ## Golden Image cache lifecycle
+
+          This release adds an operator-visible, fail-closed lifecycle for Controller and Node Golden Image caches.
+
+          - `runnerloom cache status` reports logical use, allocated bytes, aggregate Node cache/VM-storage use, physical filesystem headroom, references and hard-link state.
+          - `runnerloom cache verify` performs full SHA-256 and standalone-qcow2 verification.
+          - `runnerloom cache prune` is dry-run by default and removes only verified, unreferenced content while the relevant service is stopped.
+          - `runnerloom cache quarantine DIGEST` explicitly moves corrupt bytes to owner-only quarantine rather than silently deleting them.
+          - Enabled Pools and non-deleted Instances are protected; disabled-Pool Images remain available while an existing Instance still needs them.
+          - Missing referenced Images, orphan base links, unexpected hard links and unknown files are reported and never guessed away.
+          - Imports now preserve a physical filesystem safety reserve in addition to the logical cache limit.
+
+          See `docs/CACHE_MANAGEMENT.ja.md` for the storage model, safe cleanup procedure and current constraints. Writable dependency caches remain Job-ephemeral; same-host Controller/Node deduplication and byte-range download resume are not included in this release.
+          EOF
+            gh release create "$TAG" --repo "$REPO" \
+              --target "$merge_sha" \
+              --title "RunnerLoom $TAG" \
+              --notes-file /tmp/release-notes.md \
+              --prerelease \
+              dist/runnerloom-0.1.0-rc.3-linux-amd64.tar.gz \
+              'dist/runnerloom_0.1.0~rc.3_amd64.deb' \
+              dist/runnerloom-0.1.0-rc.3-buildinfo.json \
+              dist/SHA256SUMS
+          fi
+          gh release view "$TAG" --repo "$REPO" --json url,tagName,isDraft,isPrerelease,targetCommitish,assets
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Merged and released as **$TAG** from commit \`$merge_sha\`. Release assets and SHA256SUMS were rebuilt from the merged source and verified before publication." >/dev/null
