@@ -1,0 +1,266 @@
+name: Internal authoritative interactive CLI finalizer
+
+on:
+  push:
+    branches: [feat/interactive-cli-rc4]
+    paths:
+      - .github/workflows/internal-authoritative-interactive-finalizer.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Reconcile final source
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cli = Path("internal/cli/cli.go")
+          text = cli.read_text(encoding="utf-8")
+          old_struct = '''type App struct {
+          \tState          string
+          \tJSON           bool
+          \tNonInteractive bool
+          \tIn             io.Reader
+          \tOut            io.Writer
+          \tErr            io.Writer
+          }
+          '''
+          new_struct = '''type App struct {
+          \tState          string
+          \tJSON           bool
+          \tNonInteractive bool
+          \tIn             io.Reader
+          \tOut            io.Writer
+          \tErr            io.Writer
+
+          \t// Test hooks are intentionally unexported. Production uses TTY detection and
+          \t// creates a fresh Cobra command for every guided action.
+          \tinteractiveTerminal func() bool
+          \tinteractiveCommand  func(context.Context, []string) error
+          }
+          '''
+          if new_struct not in text:
+              if old_struct not in text:
+                  raise SystemExit("internal/cli/cli.go: App struct target missing")
+              text = text.replace(old_struct, new_struct, 1)
+          old_run = '\troot.RunE = func(c *cobra.Command, _ []string) error { return c.Help() }\n'
+          new_run = '''\troot.RunE = func(c *cobra.Command, _ []string) error {
+          \t\tif a.JSON || a.NonInteractive || !a.isInteractiveTerminal() {
+          \t\t\treturn c.Help()
+          \t\t}
+          \t\treturn a.runInteractive(c.Context())
+          \t}
+          '''
+          if new_run not in text:
+              if old_run not in text:
+                  raise SystemExit("internal/cli/cli.go: root RunE target missing")
+              text = text.replace(old_run, new_run, 1)
+          if "\ta.addInteractive(root)\n" not in text:
+              marker = "\ta.addCache(root)\n"
+              if marker in text:
+                  text = text.replace(marker, marker + "\ta.addInteractive(root)\n", 1)
+              else:
+                  index = text.rfind("\treturn root\n")
+                  if index < 0:
+                      raise SystemExit("internal/cli/cli.go: return root missing")
+                  text = text[:index] + "\ta.addInteractive(root)\n" + text[index:]
+          cli.write_text(text, encoding="utf-8")
+
+          setup = Path("internal/cli/setup.go")
+          text = setup.read_text(encoding="utf-8")
+          text = text.replace("reader := bufio.NewReader(a.In)", "reader := sharedReader(a.In)")
+          setup.write_text(text, encoding="utf-8")
+
+          interactive = Path("internal/cli/interactive.go")
+          text = interactive.read_text(encoding="utf-8")
+          start = text.index("func (s *interactiveSession) printf(")
+          end = text.index("\nfunc (s *interactiveSession) println", start)
+          replacement = '''func interactiveFormatValue(value any) any {
+          \tswitch typed := value.(type) {
+          \tcase int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, uintptr, float32, float64:
+          \t\treturn typed
+          \tcase fmt.Stringer:
+          \t\treturn interactiveSafe(typed.String())
+          \tdefault:
+          \t\treturn interactiveSafe(fmt.Sprint(value))
+          \t}
+          }
+
+          func (s *interactiveSession) printf(format string, values ...any) {
+          \tsafe := make([]any, len(values))
+          \tfor index, value := range values {
+          \t\tsafe[index] = interactiveFormatValue(value)
+          \t}
+          \t_, _ = fmt.Fprintf(s.app.Err, format, safe...)
+          }
+          '''
+          text = text[:start] + replacement + text[end:]
+          interactive.write_text(text, encoding="utf-8")
+
+          tests = Path("internal/cli/interactive_test.go")
+          text = tests.read_text(encoding="utf-8").replace("root.SetArgs(nil)", "root.SetArgs([]string{})")
+          tests.write_text(text, encoding="utf-8")
+
+          Path("VERSION").write_text("0.1.0-rc.4\n", encoding="utf-8")
+
+          changelog = Path("CHANGELOG.md")
+          text = changelog.read_text(encoding="utf-8")
+          section = '''## 0.1.0-rc.4 - 2026-09-11
+
+- Add a TTY-only guided interactive CLI while preserving every existing subcommand and JSON/non-interactive contract.
+- Cover setup, diagnostics, image/cache, network, services, node lifecycle, VM stop, GitHub checks, backup and maintenance from one menu.
+- Require dry-run previews and exact confirmation phrases before destructive or host-changing operations.
+- Add regression coverage for non-TTY behavior, argument boundaries, cancellation and confirmation gates.
+
+'''
+          if "## 0.1.0-rc.4" not in text:
+              if text.startswith("# ") and "\n\n" in text:
+                  index = text.index("\n\n") + 2
+                  text = text[:index] + section + text[index:]
+              else:
+                  text = section + text
+              changelog.write_text(text, encoding="utf-8")
+
+          readme = Path("README.md")
+          text = readme.read_text(encoding="utf-8")
+          section = '''## 対話CLI
+
+TTYで`runnerloom`を引数なしで実行すると、人向けの対話メニューを開始します。明示的な`runnerloom interactive`と`runnerloom menu`も利用できます。
+
+```bash
+sudo runnerloom --state /var/lib/runnerloom/controller
+```
+
+対話メニューは既存サブコマンドの案内層です。`--json`、`--non-interactive`、明示したサブコマンド、非TTY実行は入力待ちに入りません。Cache整理やNetwork適用などはdry-runと完全一致の確認語を通過した場合だけ実行します。
+
+詳しくは[対話CLIガイド](docs/INTERACTIVE_CLI.ja.md)を参照してください。
+
+'''
+          if "## 対話CLI" not in text:
+              marker = "## License\n"
+              text = text.replace(marker, section + marker, 1) if marker in text else text.rstrip() + "\n\n" + section
+              readme.write_text(text, encoding="utf-8")
+
+          docs_index = Path("docs/README.md")
+          text = docs_index.read_text(encoding="utf-8")
+          if "INTERACTIVE_CLI.ja.md" not in text:
+              text = text.rstrip() + '''
+
+## 対話操作
+
+- [対話CLI](INTERACTIVE_CLI.ja.md) — TTYメニュー、既存CLIとの互換性、確認語、操作範囲
+'''
+              docs_index.write_text(text, encoding="utf-8")
+
+          quickstart = Path("docs/QUICKSTART.ja.md")
+          text = quickstart.read_text(encoding="utf-8")
+          section = '''## 対話CLIで進める場合
+
+CLIインストール後、TTYで`runnerloom`を引数なしで実行するか、`runnerloom interactive`を実行すると、同じサブコマンドを対話メニューから選べます。
+
+```bash
+sudo runnerloom --state /var/lib/runnerloom/controller
+```
+
+このQuick Startは、各操作の意味と完了条件を確認するため引き続き上から読んでください。対話モードでも`setup`だけでGitHub、Network、Service、実Jobまで完成したとは扱いません。詳細は[対話CLIガイド](INTERACTIVE_CLI.ja.md)を参照してください。
+
+'''
+          if "## 対話CLIで進める場合" not in text:
+              marker = "## このガイドの完了条件\n"
+              if marker not in text:
+                  raise SystemExit("docs/QUICKSTART.ja.md: insertion marker missing")
+              text = text.replace(marker, section + marker, 1)
+              quickstart.write_text(text, encoding="utf-8")
+
+          guide = Path("docs/INTERACTIVE_CLI.ja.md")
+          text = guide.read_text(encoding="utf-8").replace("RunnerLoom 0.1.0-rc.x 対話モード", "RunnerLoom <version> 対話モード")
+          guide.write_text(text, encoding="utf-8")
+
+          checker = Path("scripts/check-docs.py")
+          text = checker.read_text(encoding="utf-8")
+          entry = '    ROOT / "docs" / "INTERACTIVE_CLI.ja.md",\n'
+          if entry not in text:
+              for marker in ('    ROOT / "docs" / "CACHE.ja.md",\n', '    ROOT / "docs" / "TROUBLESHOOTING.ja.md",\n', '    ROOT / "docs" / "README.md",\n'):
+                  if marker in text:
+                      text = text.replace(marker, marker + entry, 1)
+                      break
+              else:
+                  raise SystemExit("scripts/check-docs.py: DOCS tuple marker missing")
+              checker.write_text(text, encoding="utf-8")
+
+          for path in (Path("scripts/package.py"), Path("scripts/test_package.py")):
+              text = path.read_text(encoding="utf-8")
+              if "INTERACTIVE_CLI.ja.md" in text:
+                  continue
+              replacements = (
+                  ('"docs/CACHE.ja.md",', '"docs/CACHE.ja.md",\n        "docs/INTERACTIVE_CLI.ja.md",'),
+                  ('"CACHE.ja.md",', '"CACHE.ja.md",\n        "INTERACTIVE_CLI.ja.md",'),
+                  ("'docs/CACHE.ja.md',", "'docs/CACHE.ja.md',\n        'docs/INTERACTIVE_CLI.ja.md',"),
+                  ("'CACHE.ja.md',", "'CACHE.ja.md',\n        'INTERACTIVE_CLI.ja.md',"),
+              )
+              for old, new in replacements:
+                  if old in text:
+                      text = text.replace(old, new, 1)
+                      path.write_text(text, encoding="utf-8")
+                      break
+          PY
+
+          gofmt -w internal/cli/cli.go internal/cli/setup.go internal/cli/interactive.go internal/cli/interactive_test.go
+          go mod tidy
+
+      - name: Validate source and packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l cmd internal)"
+          python3 scripts/check-docs.py
+          git diff --check
+          go vet ./...
+          go test -count=1 ./...
+          go test -race -count=1 ./internal/cli
+          python3.12 scripts/package.py --deb
+          python3.12 scripts/test_package.py dist
+          stage="$RUNNER_TEMP/package-check"
+          mkdir -p "$stage"
+          tar -xzf dist/runnerloom-*-linux-amd64.tar.gz -C "$stage"
+          test -n "$(find "$stage" -path '*/docs/INTERACTIVE_CLI.ja.md' -print -quit)"
+          binary="$(find "$stage" -path '*/runnerloom' -type f -print -quit)"
+          test -n "$binary"
+          "$binary" --help --json | grep -q 'runnerloom interactive'
+          set +e
+          timeout 5 "$binary" interactive </dev/null >"$RUNNER_TEMP/non-tty.out" 2>"$RUNNER_TEMP/non-tty.err"
+          code=$?
+          set -e
+          test "$code" -ne 124
+          grep -q 'TTY_REQUIRED' "$RUNNER_TEMP/non-tty.err"
+
+      - name: Remove all temporary workflows and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/internal-apply-interactive-cli.yml
+          rm -f .github/workflows/internal-finish-interactive-cli.yml
+          rm -f .github/workflows/internal-export-final-interactive.yml
+          rm -f .github/workflows/internal-authoritative-interactive-finalizer.yml
+          rm -f .github/workflows/internal-source-export.yml
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'feat(cli): add safe guided interactive mode'
+          git push origin HEAD:feat/interactive-cli-rc4

@@ -1,0 +1,331 @@
+name: Internal recover interactive rc4
+
+on:
+  push:
+    branches: [feat/interactive-cli-rc4]
+    paths:
+      - .github/workflows/internal-recover-interactive-rc4.yml
+
+permissions:
+  actions: write
+  checks: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: runnerloom-interactive-rc4-release
+  cancel-in-progress: true
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Cancel superseded internal runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          BRANCH: feat/interactive-cli-rc4
+        run: |
+          set -euo pipefail
+          gh run list --repo "$REPO" --branch "$BRANCH" --limit 100 --json databaseId,name,status \
+            | jq -r --argjson self "$GITHUB_RUN_ID" '.[] | select(.databaseId != $self and (.name | startswith("Internal ")) and (.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "waiting")) | .databaseId' \
+            | while read -r run_id; do
+                test -n "$run_id" && gh run cancel "$run_id" --repo "$REPO" || true
+              done
+      - name: Verify an already published release or require merged PR 14
+        id: preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          TAG: v0.1.0-rc.4
+        run: |
+          set -euo pipefail
+          merged="$(gh pr view 14 --repo "$REPO" --json mergedAt --jq '.mergedAt != null')"
+          merge_sha="$(gh pr view 14 --repo "$REPO" --json mergeCommit --jq '.mergeCommit.oid // empty')"
+          released=false
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            released=true
+            test "$merged" = true
+            test -n "$merge_sha"
+            target="$(gh release view "$TAG" --repo "$REPO" --json targetCommitish --jq .targetCommitish)"
+            test "$target" = "$merge_sha"
+            verify="$RUNNER_TEMP/existing-release"
+            mkdir -p "$verify"
+            gh release download "$TAG" --repo "$REPO" --dir "$verify"
+            (cd "$verify" && sha256sum --check SHA256SUMS)
+            jq -e --arg sha "$merge_sha" '.sourceCommit == $sha' "$verify/runnerloom-0.1.0-rc.4-buildinfo.json"
+          else
+            test "$merged" = true
+            test -n "$merge_sha"
+          fi
+          echo "released=$released" >> "$GITHUB_OUTPUT"
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.preflight.outputs.released != 'true'
+        with:
+          ref: feat/interactive-cli-rc4
+          path: source-branch
+      - name: Preserve recovery inputs from the feature branch
+        if: steps.preflight.outputs.released != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/interactive-recovery/internal/cli" "$RUNNER_TEMP/interactive-recovery/docs" "$RUNNER_TEMP/interactive-recovery/scripts"
+          cp source-branch/scripts/recover-interactive-rc4.py "$RUNNER_TEMP/interactive-recovery/scripts/"
+          cp source-branch/internal/cli/interactive.go "$RUNNER_TEMP/interactive-recovery/internal/cli/"
+          cp source-branch/internal/cli/interactive_test.go "$RUNNER_TEMP/interactive-recovery/internal/cli/"
+          cp source-branch/internal/cli/interactive_path_test.go "$RUNNER_TEMP/interactive-recovery/internal/cli/"
+          cp source-branch/internal/cli/interactive_security_gate_test.go "$RUNNER_TEMP/interactive-recovery/internal/cli/"
+          cp source-branch/internal/cli/setup_prompt_security_gate_test.go "$RUNNER_TEMP/interactive-recovery/internal/cli/"
+          cp source-branch/docs/INTERACTIVE_CLI.ja.md "$RUNNER_TEMP/interactive-recovery/docs/"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.preflight.outputs.released != 'true'
+        with:
+          ref: main
+          path: main-worktree
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.preflight.outputs.released != 'true'
+        with:
+          go-version: '1.27.1'
+          cache: true
+          cache-dependency-path: main-worktree/go.sum
+      - name: Normalize the merged main tree
+        if: steps.preflight.outputs.released != 'true'
+        working-directory: main-worktree
+        run: |
+          set -euo pipefail
+          for file in \
+            interactive.go \
+            interactive_test.go \
+            interactive_path_test.go \
+            interactive_security_gate_test.go \
+            setup_prompt_security_gate_test.go; do
+            if ! test -f "internal/cli/$file"; then
+              cp "$RUNNER_TEMP/interactive-recovery/internal/cli/$file" "internal/cli/$file"
+            fi
+          done
+          if ! test -f docs/INTERACTIVE_CLI.ja.md; then
+            cp "$RUNNER_TEMP/interactive-recovery/docs/INTERACTIVE_CLI.ja.md" docs/INTERACTIVE_CLI.ja.md
+          fi
+          cp "$RUNNER_TEMP/interactive-recovery/scripts/recover-interactive-rc4.py" "$RUNNER_TEMP/recover-interactive-rc4.py"
+          python3 "$RUNNER_TEMP/recover-interactive-rc4.py"
+          rm -f scripts/recover-interactive-rc4.py
+          gofmt -w internal/cli/cli.go internal/cli/setup.go internal/cli/interactive*.go internal/cli/setup_prompt_security_gate_test.go
+          go mod tidy
+      - name: Review, race-test and package normalized main
+        if: steps.preflight.outputs.released != 'true'
+        working-directory: main-worktree
+        run: |
+          set -euo pipefail
+          python3 scripts/check-docs.py
+          git diff --check
+          grep -F 'a.addInteractive(root)' internal/cli/cli.go
+          grep -F 'full = append(full, "--non-interactive")' internal/cli/interactive.go
+          grep -F 'Golden Image出力先' internal/cli/interactive.go
+          grep -F 'Cluster設定をplanして適用' internal/cli/interactive.go
+          grep -F 'interactiveSafe(label), interactiveSafe(fallback)' internal/cli/setup.go
+          grep -Fx '0.1.0-rc.4' VERSION
+          ! find .github/workflows scripts -type f \( -name 'internal-*interactive*' -o -name 'recover-interactive-rc4.py' -o -name 'apply-interactive-rc4.py' \) -print -quit | grep .
+          go vet ./...
+          go test -race -count=1 ./...
+          go mod vendor
+          python3 scripts/package.py --deb
+          python3 scripts/test_package.py dist
+          (cd dist && sha256sum --check SHA256SUMS)
+          git diff --exit-code -- go.mod go.sum
+      - name: Smoke-test the normalized packaged binary
+        if: steps.preflight.outputs.released != 'true'
+        working-directory: main-worktree
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/recovery-package"
+          mkdir -p "$stage"
+          tar -xzf dist/runnerloom-0.1.0-rc.4-linux-amd64.tar.gz -C "$stage"
+          binary="$(find "$stage" -type f -name runnerloom -perm -111 -print -quit)"
+          test -n "$binary"
+          printf '0\n' | script -qefc "$binary" "$RUNNER_TEMP/recovery-tty.log"
+          grep -F 'RunnerLoom 0.1.0-rc.4 対話モード' "$RUNNER_TEMP/recovery-tty.log"
+          printf '0\n' | "$binary" > "$RUNNER_TEMP/recovery-nontty.out" 2> "$RUNNER_TEMP/recovery-nontty.err"
+          ! grep -F 'メインメニュー' "$RUNNER_TEMP/recovery-nontty.out" "$RUNNER_TEMP/recovery-nontty.err"
+          grep -F 'Usage:' "$RUNNER_TEMP/recovery-nontty.out" "$RUNNER_TEMP/recovery-nontty.err"
+          "$binary" --json > "$RUNNER_TEMP/recovery-help.json"
+          jq -e '.ok == true and (.data.commands | length > 0)' "$RUNNER_TEMP/recovery-help.json"
+      - name: Create a cleanup PR only when merged main needs correction
+        if: steps.preflight.outputs.released != 'true'
+        id: cleanup
+        working-directory: main-worktree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+        run: |
+          set -euo pipefail
+          rm -rf vendor dist
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          if test -z "$(git status --porcelain)"; then
+            echo 'needed=false' >> "$GITHUB_OUTPUT"
+            echo "main_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          branch="fix/interactive-rc4-recovery-$GITHUB_RUN_ID"
+          git checkout -b "$branch"
+          git commit -m 'fix(cli): finalize interactive rc.4 release tree'
+          git push origin "HEAD:$branch"
+          pr_url="$(gh pr create --repo "$REPO" --base main --head "$branch" --title 'fix(cli): finalize interactive rc.4 release tree' --body 'Removes temporary release machinery from main if present and normalizes the interactive CLI, prompt sanitization, tests, documentation, and rc.4 version before publishing. The recovery gate already passed docs, vet, race tests, packaging, checksums, and packaged TTY/non-TTY smoke tests.')"
+          echo 'needed=true' >> "$GITHUB_OUTPUT"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "number=${pr_url##*/}" >> "$GITHUB_OUTPUT"
+      - name: Run CI and CodeRabbit on cleanup PR
+        if: steps.preflight.outputs.released != 'true' && steps.cleanup.outputs.needed == 'true'
+        id: cleanup_review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          BRANCH: ${{ steps.cleanup.outputs.branch }}
+          PR_NUMBER: ${{ steps.cleanup.outputs.number }}
+        run: |
+          set -euo pipefail
+          head_sha="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq .headRefOid)"
+          gh workflow run ci.yml --repo "$REPO" --ref "$BRANCH"
+          run_id=""
+          for _ in $(seq 1 60); do
+            runs="$(gh run list --repo "$REPO" --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch --limit 50 --json databaseId,headSha,createdAt)"
+            run_id="$(printf '%s' "$runs" | jq -r --arg sha "$head_sha" 'map(select(.headSha == $sha)) | sort_by(.createdAt) | last | .databaseId // empty')"
+            test -n "$run_id" && break
+            sleep 5
+          done
+          test -n "$run_id"
+          gh run watch "$run_id" --repo "$REPO" --exit-status
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body '@coderabbitai review'
+          reviewed=0
+          for attempt in $(seq 1 120); do
+            reviewed="$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/reviews" | jq -s --arg sha "$head_sha" '[add[] | select((.user.login == "coderabbitai[bot]" or .user.login == "coderabbitai") and .commit_id == $sha)] | length')"
+            test "$reviewed" -gt 0 && break
+            if test "$attempt" -eq 60; then
+              gh pr comment "$PR_NUMBER" --repo "$REPO" --body '@coderabbitai review'
+            fi
+            sleep 10
+          done
+          test "$reviewed" -gt 0
+          unresolved="$(gh api graphql -f owner=MOVEI144 -f name=RunnerLoom -F number="$PR_NUMBER" -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}}}}' --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')"
+          test "$unresolved" -eq 0
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --merge --delete-branch
+          merge_sha="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeCommit --jq .mergeCommit.oid)"
+          test -n "$merge_sha"
+          echo "merge_sha=$merge_sha" >> "$GITHUB_OUTPUT"
+      - name: Resolve release source commit
+        if: steps.preflight.outputs.released != 'true'
+        id: source
+        env:
+          CLEANUP_NEEDED: ${{ steps.cleanup.outputs.needed }}
+          CLEANUP_SHA: ${{ steps.cleanup_review.outputs.merge_sha }}
+          ORIGINAL_SHA: ${{ steps.cleanup.outputs.main_sha }}
+        run: |
+          set -euo pipefail
+          if test "$CLEANUP_NEEDED" = true; then
+            sha="$CLEANUP_SHA"
+          else
+            sha="$ORIGINAL_SHA"
+          fi
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Require CodeRabbit evidence for original PR when no cleanup was needed
+        if: steps.preflight.outputs.released != 'true' && steps.cleanup.outputs.needed != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+        run: |
+          set -euo pipefail
+          head_sha="$(gh pr view 14 --repo "$REPO" --json headRefOid --jq .headRefOid)"
+          reviewed="$(gh api --paginate "repos/$REPO/pulls/14/reviews" | jq -s --arg sha "$head_sha" '[add[] | select((.user.login == "coderabbitai[bot]" or .user.login == "coderabbitai") and .commit_id == $sha)] | length')"
+          test "$reviewed" -gt 0
+      - name: Run full CI on exact release source
+        if: steps.preflight.outputs.released != 'true'
+        id: main_ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          current="$(gh api "repos/$REPO/commits/main" --jq .sha)"
+          test "$current" = "$SOURCE_SHA"
+          gh workflow run ci.yml --repo "$REPO" --ref main
+          run_id=""
+          for _ in $(seq 1 60); do
+            runs="$(gh run list --repo "$REPO" --workflow ci.yml --branch main --event workflow_dispatch --limit 50 --json databaseId,headSha,createdAt)"
+            run_id="$(printf '%s' "$runs" | jq -r --arg sha "$SOURCE_SHA" 'map(select(.headSha == $sha)) | sort_by(.createdAt) | last | .databaseId // empty')"
+            test -n "$run_id" && break
+            sleep 5
+          done
+          test -n "$run_id"
+          gh run watch "$run_id" --repo "$REPO" --exit-status
+          echo "url=$(gh run view "$run_id" --repo "$REPO" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.preflight.outputs.released != 'true'
+        with:
+          ref: ${{ steps.source.outputs.sha }}
+          path: release-worktree
+      - name: Build release assets from exact source
+        if: steps.preflight.outputs.released != 'true'
+        working-directory: release-worktree
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          grep -Fx '0.1.0-rc.4' VERSION
+          go mod vendor
+          python3 scripts/package.py --deb
+          python3 scripts/test_package.py dist
+          (cd dist && sha256sum --check SHA256SUMS)
+          jq -e --arg sha "$SOURCE_SHA" '.sourceCommit == $sha' dist/runnerloom-0.1.0-rc.4-buildinfo.json
+      - name: Publish and independently verify v0.1.0-rc.4
+        if: steps.preflight.outputs.released != 'true'
+        id: publish
+        working-directory: release-worktree
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          TAG: v0.1.0-rc.4
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          CI_URL: ${{ steps.main_ci.outputs.url }}
+        run: |
+          set -euo pipefail
+          ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1
+          cat > "$RUNNER_TEMP/rc4-notes.md" <<EOF
+          ## RunnerLoom 0.1.0-rc.4
+
+          Adds a guarded numbered interactive CLI while preserving the existing automation interface.
+
+          - Run \`runnerloom\` in a terminal or \`runnerloom interactive\`.
+          - Covers setup, diagnostics, Golden Image build/import, image cache, VM network, Node, configuration, Pool/GitHub, backup/maintenance and systemd service workflows.
+          - Explicit subcommands, non-TTY, \`--json\` and \`--non-interactive\` never prompt.
+          - Host-changing operations require exact confirmation phrases and destructive maintenance remains dry-run-first.
+          - Inputs are bounded and dispatched as argument arrays; dynamic terminal output is sanitized.
+
+          Source: \`$SOURCE_SHA\`
+          Qualification: $CI_URL
+          EOF
+          gh release create "$TAG" dist/* --repo "$REPO" --target "$SOURCE_SHA" --title 'RunnerLoom 0.1.0-rc.4' --notes-file "$RUNNER_TEMP/rc4-notes.md" --prerelease
+          verify="$RUNNER_TEMP/rc4-release-verify"
+          mkdir -p "$verify"
+          gh release download "$TAG" --repo "$REPO" --dir "$verify"
+          (cd "$verify" && sha256sum --check SHA256SUMS)
+          jq -e --arg sha "$SOURCE_SHA" '.sourceCommit == $sha' "$verify/runnerloom-0.1.0-rc.4-buildinfo.json"
+          target="$(gh release view "$TAG" --repo "$REPO" --json targetCommitish --jq .targetCommitish)"
+          test "$target" = "$SOURCE_SHA"
+          echo "url=$(gh release view "$TAG" --repo "$REPO" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+      - name: Record verified recovery completion
+        if: steps.preflight.outputs.released != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+        run: |
+          gh pr comment 14 --repo "$REPO" --body "RC.4 recovery gate completed. Release: [v0.1.0-rc.4](${{ steps.publish.outputs.url }}). Source: \`${{ steps.source.outputs.sha }}\`. Main qualification: ${{ steps.main_ci.outputs.url }}. Downloaded release assets passed SHA256SUMS and buildinfo.sourceCommit verification."
+      - name: Existing release verification complete
+        if: steps.preflight.outputs.released == 'true'
+        run: echo 'Existing v0.1.0-rc.4 passed merge-target, checksum, and buildinfo verification.'
