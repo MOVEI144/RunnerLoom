@@ -15,13 +15,14 @@ import (
 )
 
 type ImageDownloadReport struct {
-	Digest        string `json:"digest"`
-	Path          string `json:"path"`
-	ResumedFrom   int64  `json:"resumedFrom"`
-	Downloaded    int64  `json:"downloaded"`
-	TotalBytes    int64  `json:"totalBytes"`
-	Complete      bool   `json:"complete"`
-	PartialRetain bool   `json:"partialRetained"`
+	Digest          string `json:"digest"`
+	Path            string `json:"path"`
+	QuarantinedPath string `json:"quarantinedPath,omitempty"`
+	ResumedFrom     int64  `json:"resumedFrom"`
+	Downloaded      int64  `json:"downloaded"`
+	TotalBytes      int64  `json:"totalBytes"`
+	Complete        bool   `json:"complete"`
+	PartialRetain   bool   `json:"partialRetained"`
 }
 
 type contentRange struct {
@@ -65,7 +66,7 @@ func (i *Images) verifyPath(ctx context.Context, path, digest string) error {
 		return err
 	}
 	if actual != digest {
-		return errors.New("image digest mismatch")
+		return errImageDigestMismatch
 	}
 	return i.inspect(ctx, path)
 }
@@ -116,15 +117,22 @@ func (i *Images) Download(ctx context.Context, client *http.Client, sourceURL, d
 	result.Path = final
 	if _, err = os.Lstat(final); err == nil {
 		if err = i.verifyPath(ctx, final, digest); err != nil {
-			return result, err
+			if !errors.Is(err, errImageDigestMismatch) {
+				return result, err
+			}
+			result.QuarantinedPath, err = i.quarantineDigestMismatch(final, digest)
+			if err != nil {
+				return result, fmt.Errorf("corrupt cache image could not be quarantined: %w", err)
+			}
+		} else {
+			st, statErr := os.Stat(final)
+			if statErr != nil {
+				return result, statErr
+			}
+			result.TotalBytes = st.Size()
+			result.Complete = true
+			return result, nil
 		}
-		st, statErr := os.Stat(final)
-		if statErr != nil {
-			return result, statErr
-		}
-		result.TotalBytes = st.Size()
-		result.Complete = true
-		return result, nil
 	} else if !os.IsNotExist(err) {
 		return result, err
 	}
@@ -146,6 +154,12 @@ func (i *Images) Download(ctx context.Context, client *http.Client, sourceURL, d
 	if availableTotal <= 0 || partialSize > availableTotal {
 		return result, errors.New("image cache or filesystem safety budget is exhausted")
 	}
+	existingPartialSize := partialSize
+	retainPartial := func(cause error) (ImageDownloadReport, error) {
+		result.ResumedFrom = existingPartialSize
+		result.PartialRetain = existingPartialSize > 0
+		return result, cause
+	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, sourceURL, nil)
 	if err != nil {
@@ -156,16 +170,12 @@ func (i *Images) Download(ctx context.Context, client *http.Client, sourceURL, d
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-", partialSize))
 		request.Header.Set("If-Range", expectedETag)
 	}
+	request.Header.Set("Accept-Encoding", "identity")
 	response, err := client.Do(request)
 	if err != nil {
-		result.ResumedFrom = partialSize
-		result.PartialRetain = partialSize > 0
-		return result, err
+		return retainPartial(err)
 	}
 	defer response.Body.Close()
-	if response.Header.Get("ETag") != expectedETag {
-		return result, errors.New("image source ETag does not match requested digest")
-	}
 
 	resume := false
 	expectedBody := response.ContentLength
@@ -175,29 +185,29 @@ func (i *Images) Download(ctx context.Context, client *http.Client, sourceURL, d
 		partialSize = 0
 	case http.StatusPartialContent:
 		if partialSize == 0 {
-			return result, errors.New("unexpected partial image response")
+			return retainPartial(errors.New("unexpected partial image response"))
 		}
 		value, parseErr := parseContentRange(response.Header.Get("Content-Range"))
 		if parseErr != nil || value.Start != partialSize {
-			return result, errors.New("image source returned an invalid resume range")
+			return retainPartial(errors.New("image source returned an invalid resume range"))
 		}
 		if response.ContentLength >= 0 && response.ContentLength != value.End-value.Start+1 {
-			return result, errors.New("image resume length does not match content range")
+			return retainPartial(errors.New("image resume length does not match content range"))
 		}
 		resume = true
 		total = value.Total
 		expectedBody = value.End - value.Start + 1
 	case http.StatusRequestedRangeNotSatisfiable:
 		if partialSize == 0 {
-			return result, errors.New("image source rejected an empty resume request")
+			return retainPartial(errors.New("image source rejected an empty resume request"))
 		}
 		value := response.Header.Get("Content-Range")
 		if !strings.HasPrefix(value, "bytes */") {
-			return result, errors.New("image source returned an invalid range rejection")
+			return retainPartial(errors.New("image source returned an invalid range rejection"))
 		}
 		total, err = strconv.ParseInt(strings.TrimPrefix(value, "bytes */"), 10, 64)
 		if err != nil || total != partialSize {
-			return result, errors.New("partial image size does not match source")
+			return retainPartial(errors.New("partial image size does not match source"))
 		}
 		if err = i.publishPartial(ctx, partial, final, digest); err != nil {
 			return result, err
@@ -207,10 +217,13 @@ func (i *Images) Download(ctx context.Context, client *http.Client, sourceURL, d
 		result.Complete = true
 		return result, nil
 	default:
-		return result, fmt.Errorf("image source returned HTTP %d", response.StatusCode)
+		return retainPartial(fmt.Errorf("image source returned HTTP %d", response.StatusCode))
+	}
+	if response.Header.Get("ETag") != expectedETag {
+		return retainPartial(errors.New("image source ETag does not match requested digest"))
 	}
 	if total > availableTotal {
-		return result, errors.New("image exceeds cache or filesystem safety budget")
+		return retainPartial(errors.New("image exceeds cache or filesystem safety budget"))
 	}
 
 	flags := os.O_CREATE | os.O_WRONLY

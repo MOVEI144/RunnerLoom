@@ -343,3 +343,191 @@ func TestParseContentRange(t *testing.T) {
 		}
 	}
 }
+
+func TestImageCachePruneFailsClosedWhenVMStorageIsMissing(t *testing.T) {
+	spec, _, disks, _ := cacheFixture(t)
+	_, cachePath := writeCachedImage(t, spec, []byte("missing-storage-image"), 30*24*time.Hour)
+	if err := os.RemoveAll(disks); err != nil {
+		t.Fatal(err)
+	}
+	report, err := PruneImageCache(context.Background(), spec, 7*24*time.Hour, true)
+	if err == nil || report.SafeToPrune {
+		t.Fatalf("missing VM storage did not block prune: %+v %v", report, err)
+	}
+	if _, statErr := os.Stat(cachePath); statErr != nil {
+		t.Fatal("fail-closed prune removed cache", statErr)
+	}
+}
+
+func TestImageCachePruneReportsPartialApplication(t *testing.T) {
+	spec, _, disks, _ := cacheFixture(t)
+	digest, cachePath := writeCachedImage(t, spec, []byte("partial-prune-image"), 30*24*time.Hour)
+	name, _ := imageName(digest)
+	basePath := filepath.Join(disks, "base", name)
+	if err := os.Link(cachePath, basePath); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	spec.removePath = func(path string) error {
+		calls++
+		if calls == 2 {
+			return errors.New("injected second unlink failure")
+		}
+		return os.Remove(path)
+	}
+	report, err := PruneImageCache(context.Background(), spec, 7*24*time.Hour, true)
+	if err == nil || !report.Applied || report.Completed || len(report.Removed) != 1 {
+		t.Fatalf("partial prune was not reported accurately: %+v %v", report, err)
+	}
+	var fault *core.Error
+	if !errors.As(err, &fault) || fault.Code != "CACHE_PRUNE_PARTIAL" {
+		t.Fatalf("wrong partial prune error: %T %v", err, err)
+	}
+	if _, statErr := os.Stat(basePath); !os.IsNotExist(statErr) {
+		t.Fatalf("first unlink was not applied: %v", statErr)
+	}
+	if _, statErr := os.Stat(cachePath); statErr != nil {
+		t.Fatal("failed second unlink unexpectedly removed cache", statErr)
+	}
+}
+
+func TestImageDownloadQuarantinesCorruptFinalAndRecovers(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "images")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	valid := bytes.Repeat([]byte("valid-runnerloom-image"), 4096)
+	corrupt := []byte("corrupt-cache-image")
+	digest := "sha256:" + core.Hash(valid)
+	name, _ := imageName(digest)
+	final := filepath.Join(dir, name)
+	if err := os.WriteFile(final, corrupt, 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Accept-Encoding") != "identity" {
+			t.Errorf("download did not force identity encoding: %q", r.Header.Get("Accept-Encoding"))
+		}
+		w.Header().Set("ETag", `"`+digest+`"`)
+		w.Header().Set("Content-Length", fmt.Sprint(len(valid)))
+		_, _ = w.Write(valid)
+	}))
+	defer server.Close()
+
+	images := &Images{Dir: dir, LimitGiB: 10, Exec: cacheExecutor{backing: map[string]string{}}}
+	report, err := images.Download(context.Background(), server.Client(), server.URL, digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Complete || report.QuarantinedPath == "" {
+		t.Fatalf("corrupt final was not quarantined before recovery: %+v", report)
+	}
+	got, err := os.ReadFile(final)
+	if err != nil || !bytes.Equal(got, valid) {
+		t.Fatal("recovered final image differs", err)
+	}
+	preserved, err := os.ReadFile(report.QuarantinedPath)
+	if err != nil || !bytes.Equal(preserved, corrupt) {
+		t.Fatal("quarantine did not preserve corrupt bytes", err)
+	}
+
+	spec := ImageCacheSpec{
+		Scope:       "controller",
+		StateDir:    filepath.Dir(dir),
+		CacheDir:    dir,
+		ProcessLock: "controller",
+		LimitGiB:    10,
+		Exec:        cacheExecutor{backing: map[string]string{}},
+		Protection:  CacheProtection{Digests: map[string][]string{}, Safe: true},
+	}
+	status, err := InspectImageCache(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.QuarantineBytes != int64(len(corrupt)) {
+		t.Fatalf("quarantine bytes not accounted: %+v", status)
+	}
+	found := false
+	for _, entry := range status.Entries {
+		if entry.Kind == "quarantine" && entry.Digest == digest {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("quarantine entry missing from status: %+v", status)
+	}
+}
+
+func TestImageImportQuarantinesCorruptExistingEntry(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "images")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	valid := []byte("valid-import-image")
+	digest := "sha256:" + core.Hash(valid)
+	name, _ := imageName(digest)
+	final := filepath.Join(dir, name)
+	if err := os.WriteFile(final, []byte("wrong-existing-image"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	images := &Images{Dir: dir, LimitGiB: 10, Exec: cacheExecutor{backing: map[string]string{}}}
+	path, err := images.Import(context.Background(), bytes.NewReader(valid), digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != final {
+		t.Fatalf("unexpected import path: %s", path)
+	}
+	got, err := os.ReadFile(final)
+	if err != nil || !bytes.Equal(got, valid) {
+		t.Fatal("valid import was not published", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(dir, ".quarantine-"+digest[7:]+"-*"))
+	if err != nil || len(matches) != 1 {
+		t.Fatalf("corrupt existing image was not quarantined: %v %v", matches, err)
+	}
+}
+
+func TestSharedCorruptImageIsNotAutomaticallyQuarantined(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "images")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	expected := []byte("expected-image")
+	digest := "sha256:" + core.Hash(expected)
+	name, _ := imageName(digest)
+	final := filepath.Join(dir, name)
+	if err := os.WriteFile(final, []byte("corrupt-shared-image"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	external := filepath.Join(t.TempDir(), "base.qcow2")
+	if err := os.Link(final, external); err != nil {
+		t.Fatal(err)
+	}
+	images := &Images{Dir: dir, LimitGiB: 10, Exec: cacheExecutor{backing: map[string]string{}}}
+	_, err := images.quarantineDigestMismatch(final, digest)
+	var fault *core.Error
+	if !errors.As(err, &fault) || fault.Code != "CACHE_IMAGE_SHARED_CORRUPTION" {
+		t.Fatalf("shared corruption was not rejected safely: %T %v", err, err)
+	}
+	if _, statErr := os.Stat(final); statErr != nil {
+		t.Fatal("shared cache link was renamed", statErr)
+	}
+	if _, statErr := os.Stat(external); statErr != nil {
+		t.Fatal("external hard link was changed", statErr)
+	}
+}
+
+func TestImageDownloadReportsHTTPStatusBeforeMissingETag(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "images")
+	digest := "sha256:" + core.Hash([]byte("not-served"))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	images := &Images{Dir: dir, LimitGiB: 10, Exec: cacheExecutor{backing: map[string]string{}}}
+	_, err := images.Download(context.Background(), server.Client(), server.URL, digest)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 503") || strings.Contains(err.Error(), "ETag") {
+		t.Fatalf("non-success response was misclassified: %v", err)
+	}
+}

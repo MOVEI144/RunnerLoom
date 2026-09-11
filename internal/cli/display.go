@@ -56,7 +56,10 @@ func humanOutput(w io.Writer, v any) (bool, error) {
 		}
 	case host.ImageCacheReport:
 		line("CACHE", rows.Scope, rows.CacheDir)
-		line("使用量 bytes", rows.CacheBytes, "新規Imageに使用可能 bytes", rows.AvailableForNewImageBytes)
+		line("安全に整理可能", rows.SafeToPrune, "安全余裕 GiB", rows.SafetyReserveGiB)
+		line("使用量 bytes", rows.CacheBytes, "partial", rows.PartialBytes, "quarantine", rows.QuarantineBytes)
+		line("base-only bytes", rows.BaseOnlyBytes, "filesystem free bytes", rows.FilesystemFreeBytes)
+		line("新規Imageに使用可能 bytes", rows.AvailableForNewImageBytes)
 		line("KIND", "DIGEST", "BYTES", "保護", "検証", "BASE", "整理可否/理由")
 		for _, entry := range rows.Entries {
 			digest := entry.Digest
@@ -75,7 +78,10 @@ func humanOutput(w io.Writer, v any) (bool, error) {
 			line("警告", warning)
 		}
 	case host.ImageCachePruneReport:
-		line("CACHE整理", rows.Scope, "適用", rows.Applied, "基準", rows.Cutoff.Local().Format(time.RFC3339))
+		line("CACHE整理", rows.Scope, "適用開始", rows.Applied, "完了", rows.Completed, "基準", rows.Cutoff.Local().Format(time.RFC3339))
+		line("安全に整理可能", rows.SafeToPrune, "安全余裕 GiB", rows.SafetyReserveGiB)
+		line("使用量 bytes", rows.CacheBytes, "partial", rows.PartialBytes, "quarantine", rows.QuarantineBytes)
+		line("base-only bytes", rows.BaseOnlyBytes, "filesystem free bytes", rows.FilesystemFreeBytes)
 		line("削除path数", len(rows.Removed), "論理bytes", rows.RemovedLogicalBytes, "物理解放見込みbytes", rows.ReclaimedBytes)
 		line("KIND", "DIGEST", "BYTES", "保護", "整理可否/理由")
 		for _, entry := range rows.Entries {
@@ -88,6 +94,9 @@ func humanOutput(w io.Writer, v any) (bool, error) {
 				reason = "削除候補"
 			}
 			line(entry.Kind, digest, entry.SizeBytes, entry.Protected, reason)
+		}
+		for _, warning := range rows.Warnings {
+			line("警告", warning)
 		}
 	case host.ImageCacheSeedReport:
 		line("DIGEST", "BYTES", "重複排除", "既存", "保存先")

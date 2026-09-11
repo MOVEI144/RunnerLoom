@@ -581,6 +581,17 @@ func (l *Libvirt) ensure(ctx context.Context, a core.Instance, jit string, diagn
 	if e = regular(base); e != nil {
 		return e
 	}
+	sourceInfo, e := regularInfo(source)
+	if e != nil {
+		return e
+	}
+	baseInfo, e := regularInfo(base)
+	if e != nil {
+		return e
+	}
+	if !os.SameFile(sourceInfo, baseInfo) {
+		return errors.New("VM base image is not the verified Node cache hard link; run cache status and reconcile storage before provisioning")
+	}
 	root := filepath.Join(dir, "root.qcow2")
 	if _, e = os.Lstat(root); os.IsNotExist(e) {
 		if _, e = l.Exec.Run(ctx, "qemu-img", []string{"create", "-f", "qcow2", "-F", "qcow2", "-b", base, root, fmt.Sprintf("%dG", a.Pool.RootGiB)}, nil); e != nil {

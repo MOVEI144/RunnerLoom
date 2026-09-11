@@ -42,6 +42,7 @@ Controllerの`--cache-gib`またはNode設定の`cacheGiB`は、そのcache dire
 
 - 完成済み`<SHA256>.qcow2`
 - 再開可能な`.partial-<SHA256>.qcow2`
+- digest不一致を検出して退避した`.quarantine-<SHA256>-*`
 - crash後に残ったRunnerLoom所有の一時import/seed file
 
 次は別会計です。
@@ -87,6 +88,8 @@ Nodeでは`agent.json`の`cacheGiB`、`stateDir`、`diskDir`を使用します�
 - partial file、未知のfile、symlink、壊れた所有境界
 
 `safeToPrune: false`の場合は、警告を解決するまで`--apply`を拒否します。
+
+Nodeの`diskDir`が消えている、外部diskがmountされていない、所有markerを確認できない場合もfail closedします。cacheだけを見て「参照なし」と推測して削除することはありません。
 
 ### 完全性も読み直す
 
@@ -175,6 +178,8 @@ sudo systemctl start "runnerloom-agent-$node_name.service"
 
 Node pruneは、Node cache fileと対応する`diskDir/base` hard linkをまとめて削除します。実overlay、未削除instance、現在のcatalog、未知のstorage entryのいずれかが残るImageは削除しません。
 
+適用中にI/Oや権限エラーが起き、すでに一部のunlinkが完了している場合は`CACHE_PRUNE_PARTIAL`を返します。JSONの`applied: true`、`completed: false`、`removed`を確認し、`cache status`で再走査してから再実行してください。途中まで変更された処理を「未適用」とは表示しません。
+
 ## 1台構成で重複をなくす
 
 ControllerとNodeが同じHost、かつ両cacheが同じfilesystem上にある場合は、通常のHTTP downloadの代わりに明示的なhard linkを作れます。
@@ -195,13 +200,15 @@ sudo runnerloom cache seed "$RL_IMAGE_DIGEST" \
 
 - Controller cacheのSHA-256
 - standalone qcow2構造
-- Node cache上限と2 GiBの安全余裕
+- Node cacheの論理上限と2 GiBのfilesystem安全余裕
 - Agentが停止していること
 - 送信元とNode cacheが同じfilesystemであること
 
 別filesystemの場合はcopyへ自動fallbackせず失敗します。その場合はAgentを起動し、通常のmTLS downloadを使ってください。
 
 hard link後は、Node側だけをpruneしてもController側のlinkが残るため、物理容量は解放されない場合があります。出力は`removedLogicalBytes`と`reclaimedPhysicalBytes`を分けて表示します。
+
+hard link自体はImage全体を再コピーしないため、物理空きにImageサイズ分の余裕は要求しません。ただし、Node cacheの論理上限には1 Image分として計上し、filesystemの安全余裕を下回る場合は拒否します。
 
 ## 中断downloadの再開
 
@@ -217,6 +224,10 @@ Node downloadはdigestごとのowner-only partial fileを残します。
 - ETag、Content-Range、全体サイズの不一致: 公開しない
 - 最終SHA-256またはqcow2検査失敗: partialを破棄
 - 古いpartial: Agent停止後の`cache prune`候補
+
+完成済みcache fileのSHA-256がfile名のdigestと一致し、かつ別のhard linkを持たない場合は、そのfileを上書き・削除せず`.quarantine-<SHA256>-*`へatomic renameしてから、正しいImageを再取得します。quarantineは容量へ計上され、`cache status`で確認でき、最低保持期間を過ぎた後に明示的な`cache prune --apply`で整理できます。
+
+digest不一致のfileに`diskDir/base`や別cacheからのhard linkが残る場合、自動renameは行いません。既存overlayがそのinodeを参照している可能性があるため、対象Poolを止め、Controller/Agentを停止し、`cache status --verify`と実overlayを照合してから退役手順を進めます。`qemu-img`コマンド自体の失敗など、digest不一致と断定できないエラーでも自動退避しません。また、VM作成時には`diskDir/base`が検証済みNode cacheと同じinodeかを再確認し、不一致のbaseから新しいVMを作りません。
 
 ## Job内の依存cache
 

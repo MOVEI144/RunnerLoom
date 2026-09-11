@@ -36,6 +36,8 @@ type ImageCacheSpec struct {
 	ProtectionFunc func(context.Context) (CacheProtection, error)
 	Verify         bool
 	Now            func() time.Time
+	removePath     func(string) error
+	syncDir        func(string) error
 }
 
 type ImageCacheEntry struct {
@@ -67,6 +69,7 @@ type ImageCacheReport struct {
 	SafetyReserveGiB          int64             `json:"safetyReserveGiB"`
 	CacheBytes                int64             `json:"cacheBytes"`
 	PartialBytes              int64             `json:"partialBytes"`
+	QuarantineBytes           int64             `json:"quarantineBytes"`
 	BaseOnlyBytes             int64             `json:"baseOnlyBytes"`
 	FilesystemFreeBytes       int64             `json:"filesystemFreeBytes"`
 	AvailableForNewImageBytes int64             `json:"availableForNewImageBytes"`
@@ -78,6 +81,7 @@ type ImageCacheReport struct {
 type ImageCachePruneReport struct {
 	ImageCacheReport
 	Applied             bool      `json:"applied"`
+	Completed           bool      `json:"completed"`
 	Cutoff              time.Time `json:"cutoff"`
 	Removed             []string  `json:"removed,omitempty"`
 	RemovedLogicalBytes int64     `json:"removedLogicalBytes"`
@@ -143,6 +147,28 @@ func digestFromPartialName(name string) (string, bool) {
 	return digestFromImageName(strings.TrimPrefix(name, prefix))
 }
 
+func digestFromQuarantineName(name string) (string, bool) {
+	const prefix = ".quarantine-"
+	if !strings.HasPrefix(name, prefix) {
+		return "", false
+	}
+	rest := strings.TrimPrefix(name, prefix)
+	if len(rest) <= 65 || rest[64] != '-' {
+		return "", false
+	}
+	hex := rest[:64]
+	suffix := rest[65:]
+	if suffix == "" || strings.Trim(hex, "0123456789abcdef") != "" {
+		return "", false
+	}
+	for _, r := range suffix {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') {
+			return "", false
+		}
+	}
+	return "sha256:" + hex, true
+}
+
 func appendWarning(p *CacheProtection, message string) {
 	p.Safe = false
 	p.Warnings = append(p.Warnings, message)
@@ -201,6 +227,7 @@ func NodeCacheProtection(ctx context.Context, stateDir, diskDir, cluster, node s
 
 	storage, err := os.Lstat(diskDir)
 	if os.IsNotExist(err) {
+		appendWarning(&p, "VM storage is missing; mount or initialize the approved disk directory before applied pruning")
 		return normalizeProtection(p)
 	}
 	if err != nil || !storage.IsDir() || storage.Mode()&os.ModeSymlink != 0 {
@@ -240,7 +267,38 @@ func NodeCacheProtection(ctx context.Context, stateDir, diskDir, cluster, node s
 			appendWarning(&p, "unexpected entry in dedicated VM storage: "+name)
 			continue
 		}
-		root := filepath.Join(diskDir, name, "root.qcow2")
+		vmDir := filepath.Join(diskDir, name)
+		vmEntries, listErr := os.ReadDir(vmDir)
+		if listErr != nil {
+			appendWarning(&p, "VM directory cannot be listed safely: "+name)
+			continue
+		}
+		rootSeen := false
+		for _, vmEntry := range vmEntries {
+			vmPath := filepath.Join(vmDir, vmEntry.Name())
+			switch vmEntry.Name() {
+			case "root.qcow2":
+				rootSeen = true
+				if st, statErr := os.Lstat(vmPath); statErr != nil || !st.Mode().IsRegular() {
+					appendWarning(&p, "VM root overlay is not a regular file: "+name)
+				}
+			case "scratch.qcow2", "seed.iso":
+				if st, statErr := os.Lstat(vmPath); statErr != nil || !st.Mode().IsRegular() {
+					appendWarning(&p, "VM storage contains an unsafe managed file: "+name+"/"+vmEntry.Name())
+				}
+			case "serial.sock":
+				if st, statErr := os.Lstat(vmPath); statErr != nil || st.Mode()&os.ModeSocket == 0 {
+					appendWarning(&p, "VM serial endpoint is not a socket: "+name)
+				}
+			default:
+				appendWarning(&p, "unexpected entry in VM directory: "+name+"/"+vmEntry.Name())
+			}
+		}
+		if !rootSeen {
+			appendWarning(&p, "VM directory has no root overlay and requires reconciliation: "+name)
+			continue
+		}
+		root := filepath.Join(vmDir, "root.qcow2")
 		st, statErr := os.Lstat(root)
 		if os.IsNotExist(statErr) {
 			continue
@@ -332,6 +390,12 @@ func validateCacheSpec(spec ImageCacheSpec) (ImageCacheSpec, error) {
 	}
 	if spec.Now == nil {
 		spec.Now = time.Now
+	}
+	if spec.removePath == nil {
+		spec.removePath = os.Remove
+	}
+	if spec.syncDir == nil {
+		spec.syncDir = syncDirectory
 	}
 	return spec, nil
 }
@@ -473,6 +537,31 @@ func InspectImageCache(ctx context.Context, input ImageCacheSpec) (ImageCacheRep
 			report.Entries = append(report.Entries, item)
 			report.CacheBytes += st.Size()
 			report.PartialBytes += st.Size()
+			continue
+		}
+		if digest, ok := digestFromQuarantineName(name); ok {
+			st, statErr := regularInfo(path)
+			if statErr != nil {
+				report.SafeToPrune = false
+				report.Warnings = append(report.Warnings, name+": "+statErr.Error())
+				continue
+			}
+			item := ImageCacheEntry{
+				Digest:            digest,
+				Kind:              "quarantine",
+				CachePath:         path,
+				SizeBytes:         st.Size(),
+				ModifiedAt:        st.ModTime().UTC(),
+				CachePresent:      true,
+				Verification:      "failed",
+				VerificationError: "digest mismatch; retained for inspection",
+				LinkCount:         fileLinkCount(st),
+				LinksRemoved:      1,
+				BlockedReasons:    []string{"minimum-age-not-evaluated"},
+			}
+			report.Entries = append(report.Entries, item)
+			report.CacheBytes += st.Size()
+			report.QuarantineBytes += st.Size()
 			continue
 		}
 		if strings.HasPrefix(name, ".import-") || strings.HasPrefix(name, ".seed-") {
@@ -645,6 +734,70 @@ func syncDirectory(path string) error {
 	return dir.Sync()
 }
 
+// quarantineDigestMismatch preserves a cache file whose bytes no longer match
+// its content-addressed name. The caller must hold the image-cache lock. The
+// file is renamed atomically and remains visible to cache status/prune.
+func (i *Images) quarantineDigestMismatch(path, digest string) (string, error) {
+	name, err := imageName(digest)
+	if err != nil {
+		return "", err
+	}
+	if filepath.Clean(path) != filepath.Join(i.Dir, name) {
+		return "", errors.New("refusing to quarantine a path outside the expected cache entry")
+	}
+	info, err := regularInfo(path)
+	if err != nil {
+		return "", err
+	}
+	if links := fileLinkCount(info); links > 1 {
+		return "", core.Fail(
+			"CACHE_IMAGE_SHARED_CORRUPTION",
+			"digest不一致のImageに別のhard linkがあります。所有serviceを停止し、overlay参照を確認してから整理してください",
+			map[string]any{"path": path, "linkCount": links},
+		)
+	}
+	actual, _, err := hashFile(path)
+	if err != nil {
+		return "", err
+	}
+	if actual == digest {
+		return "", errors.New("refusing to quarantine an image whose digest now matches")
+	}
+	temp, err := os.CreateTemp(i.Dir, ".quarantine-"+digest[7:]+"-")
+	if err != nil {
+		return "", err
+	}
+	quarantine := temp.Name()
+	if err = temp.Close(); err != nil {
+		_ = os.Remove(quarantine)
+		return "", err
+	}
+	if err = os.Remove(quarantine); err != nil {
+		return "", err
+	}
+	if err = os.Rename(path, quarantine); err != nil {
+		return "", err
+	}
+	if i.verified != nil {
+		delete(i.verified, digest)
+	}
+	if err = syncDirectory(i.Dir); err != nil {
+		return quarantine, err
+	}
+	return quarantine, nil
+}
+
+func pruneFailure(report ImageCachePruneReport, err error) (ImageCachePruneReport, error) {
+	if !report.Applied {
+		return report, err
+	}
+	return report, core.Fail(
+		"CACHE_PRUNE_PARTIAL",
+		"cache整理の一部が適用済みです。statusを再確認してから再実行してください",
+		map[string]any{"report": report, "cause": err.Error()},
+	)
+}
+
 // PruneImageCache is dry-run by default. Applied pruning requires the owning
 // Controller or Agent lock, rescans under both process and cache locks, and only
 // removes exact files that remain old and unreferenced.
@@ -696,23 +849,25 @@ func PruneImageCache(ctx context.Context, input ImageCacheSpec, olderThan time.D
 			}
 			st, statErr := regularInfo(path)
 			if statErr != nil {
-				return report, statErr
+				return pruneFailure(report, statErr)
 			}
 			if st.ModTime().UTC().After(cutoff) {
-				return report, errors.New("cache entry changed after prune planning")
+				return pruneFailure(report, errors.New("cache entry changed after prune planning"))
 			}
-			if removeErr := os.Remove(path); removeErr != nil {
-				return report, removeErr
+			if removeErr := spec.removePath(path); removeErr != nil {
+				return pruneFailure(report, removeErr)
 			}
+			report.Applied = true
 			report.Removed = append(report.Removed, path)
-			if syncErr := syncDirectory(filepath.Dir(path)); syncErr != nil {
-				return report, syncErr
+			if syncErr := spec.syncDir(filepath.Dir(path)); syncErr != nil {
+				return pruneFailure(report, syncErr)
 			}
 		}
 		report.RemovedLogicalBytes += entry.SizeBytes
 		report.ReclaimedBytes += entry.ReclaimableBytes
 	}
 	report.Applied = true
+	report.Completed = true
 	return report, nil
 }
 
@@ -738,7 +893,8 @@ func cacheStoredBytes(dir string) (int64, error) {
 		name := entry.Name()
 		_, final := digestFromImageName(name)
 		_, partial := digestFromPartialName(name)
-		if !final && !partial && !strings.HasPrefix(name, ".import-") && !strings.HasPrefix(name, ".seed-") {
+		_, quarantine := digestFromQuarantineName(name)
+		if !final && !partial && !quarantine && !strings.HasPrefix(name, ".import-") && !strings.HasPrefix(name, ".seed-") {
 			continue
 		}
 		st, statErr := entry.Info()
@@ -768,6 +924,18 @@ func cacheAvailableBytes(dir string, limitGiB, replacingBytes int64) (int64, err
 		return budget, nil
 	}
 	return disk, nil
+}
+
+func cacheLogicalAvailableBytes(dir string, limitGiB, replacingBytes int64) (int64, error) {
+	used, err := cacheStoredBytes(dir)
+	if err != nil {
+		return 0, err
+	}
+	available := limitGiB*(1<<30) - (used - replacingBytes)
+	if available < 0 {
+		return 0, nil
+	}
+	return available, nil
 }
 
 func lockCacheDirectories(first, second string) (func() error, error) {
@@ -859,12 +1027,19 @@ func SeedImageCache(ctx context.Context, sourceDir string, nodeSpec ImageCacheSp
 	} else if !os.IsNotExist(statErr) {
 		return ImageCacheSeedReport{}, statErr
 	}
-	available, err := cacheAvailableBytes(spec.CacheDir, spec.LimitGiB, 0)
+	available, err := cacheLogicalAvailableBytes(spec.CacheDir, spec.LimitGiB, 0)
 	if err != nil {
 		return ImageCacheSeedReport{}, err
 	}
 	if sourceInfo.Size() > available {
-		return ImageCacheSeedReport{}, errors.New("node cache or filesystem safety budget is insufficient")
+		return ImageCacheSeedReport{}, errors.New("node cache logical budget is insufficient")
+	}
+	free, err := filesystemFreeBytes(spec.CacheDir)
+	if err != nil {
+		return ImageCacheSeedReport{}, err
+	}
+	if free <= CacheSafetyReserveGiB*(1<<30) {
+		return ImageCacheSeedReport{}, errors.New("node cache filesystem safety reserve is exhausted")
 	}
 	temp, err := os.CreateTemp(spec.CacheDir, ".seed-")
 	if err != nil {
