@@ -1,0 +1,464 @@
+name: Internal RC4 final pipeline v2
+
+on:
+  push:
+    branches: [feat/interactive-cli-rc4]
+    paths:
+      - .github/workflows/internal-rc4-final-pipeline-v2.yml
+
+permissions:
+  actions: write
+  checks: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  REPOSITORY: ${{ github.repository }}
+  PR_NUMBER: "14"
+  RELEASE_TAG: v0.1.0-rc.4
+
+jobs:
+  pipeline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+
+      - name: Reconcile source and documentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def insert_once(text: str, marker: str, addition: str, label: str) -> str:
+              if addition in text:
+                  return text
+              if marker not in text:
+                  raise SystemExit(f"{label}: insertion marker missing")
+              return text.replace(marker, marker + addition, 1)
+
+          cli = Path("internal/cli/cli.go")
+          text = cli.read_text(encoding="utf-8")
+          old_struct = '''type App struct {
+          \tState          string
+          \tJSON           bool
+          \tNonInteractive bool
+          \tIn             io.Reader
+          \tOut            io.Writer
+          \tErr            io.Writer
+          }
+          '''
+          new_struct = '''type App struct {
+          \tState          string
+          \tJSON           bool
+          \tNonInteractive bool
+          \tIn             io.Reader
+          \tOut            io.Writer
+          \tErr            io.Writer
+
+          \t// Test hooks are intentionally unexported. Production uses TTY detection and
+          \t// creates a fresh Cobra command for every guided action.
+          \tinteractiveTerminal func() bool
+          \tinteractiveCommand  func(context.Context, []string) error
+          }
+          '''
+          if new_struct not in text:
+              if text.count(old_struct) != 1:
+                  raise SystemExit("cli.go: App struct changed")
+              text = text.replace(old_struct, new_struct, 1)
+          old_run = '\troot.RunE = func(c *cobra.Command, _ []string) error { return c.Help() }\n'
+          new_run = '''\troot.RunE = func(c *cobra.Command, _ []string) error {
+          \t\tif a.JSON || a.NonInteractive || !a.isInteractiveTerminal() {
+          \t\t\treturn c.Help()
+          \t\t}
+          \t\treturn a.runInteractive(c.Context())
+          \t}
+          '''
+          if new_run not in text:
+              if text.count(old_run) != 1:
+                  raise SystemExit("cli.go: root RunE changed")
+              text = text.replace(old_run, new_run, 1)
+          if "\ta.addInteractive(root)\n" not in text:
+              if "\ta.addCache(root)\n" in text:
+                  text = text.replace("\ta.addCache(root)\n", "\ta.addCache(root)\n\ta.addInteractive(root)\n", 1)
+              else:
+                  pos = text.rfind("\treturn root\n")
+                  if pos < 0:
+                      raise SystemExit("cli.go: return root missing")
+                  text = text[:pos] + "\ta.addInteractive(root)\n" + text[pos:]
+          cli.write_text(text, encoding="utf-8")
+
+          setup = Path("internal/cli/setup.go")
+          setup.write_text(setup.read_text(encoding="utf-8").replace("reader := bufio.NewReader(a.In)", "reader := sharedReader(a.In)"), encoding="utf-8")
+
+          interactive = Path("internal/cli/interactive.go")
+          if not interactive.exists():
+              raise SystemExit("interactive.go missing")
+          text = interactive.read_text(encoding="utf-8")
+          if "func interactiveFormatValue" not in text:
+              start = text.index("func (s *interactiveSession) printf")
+              end = text.index("\nfunc (s *interactiveSession) println", start)
+              replacement = '''func interactiveFormatValue(value any) any {
+          \tswitch typed := value.(type) {
+          \tcase int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, uintptr, float32, float64:
+          \t\treturn typed
+          \tcase fmt.Stringer:
+          \t\treturn interactiveSafe(typed.String())
+          \tdefault:
+          \t\treturn interactiveSafe(fmt.Sprint(value))
+          \t}
+          }
+
+          func (s *interactiveSession) printf(format string, values ...any) {
+          \tsafe := make([]any, len(values))
+          \tfor index, value := range values {
+          \t\tsafe[index] = interactiveFormatValue(value)
+          \t}
+          \t_, _ = fmt.Fprintf(s.app.Err, format, safe...)
+          }
+          '''
+              text = text[:start] + replacement + text[end:]
+          interactive.write_text(text, encoding="utf-8")
+
+          Path("VERSION").write_text("0.1.0-rc.4\n", encoding="utf-8")
+          guide = Path("docs/INTERACTIVE_CLI.ja.md")
+          if not guide.exists():
+              raise SystemExit("interactive guide missing")
+          guide.write_text(guide.read_text(encoding="utf-8").replace("RunnerLoom 0.1.0-rc.x 対話モード", "RunnerLoom <version> 対話モード"), encoding="utf-8")
+
+          changelog = Path("CHANGELOG.md")
+          text = changelog.read_text(encoding="utf-8")
+          if "## 0.1.0-rc.4" not in text:
+              section = '''## 0.1.0-rc.4 - 2026-09-11
+
+- Add a TTY-only guided interactive CLI while preserving every existing subcommand and JSON/non-interactive contract.
+- Cover setup, diagnostics, image/cache, network, services, node lifecycle, VM stop, GitHub checks, backup and maintenance from one menu.
+- Require dry-run previews and exact confirmation phrases before destructive or host-changing operations.
+- Add regression coverage for non-TTY behavior, argument boundaries, cancellation and confirmation gates.
+
+'''
+              pos = text.index("\n\n") + 2 if text.startswith("# ") and "\n\n" in text else 0
+              changelog.write_text(text[:pos] + section + text[pos:], encoding="utf-8")
+
+          readme = Path("README.md")
+          text = readme.read_text(encoding="utf-8")
+          if "## 対話CLI" not in text:
+              section = '''## 対話CLI
+
+TTYで`runnerloom`を引数なしで実行すると、人向けの対話メニューを開始します。明示的な`runnerloom interactive`と`runnerloom menu`も利用できます。
+
+```bash
+sudo runnerloom --state /var/lib/runnerloom/controller
+```
+
+対話メニューは既存サブコマンドの案内層です。`--json`、`--non-interactive`、明示したサブコマンド、非TTY実行は入力待ちに入りません。Cache整理やNetwork適用などはdry-runと完全一致の確認語を通過した場合だけ実行します。
+
+詳しくは[対話CLIガイド](docs/INTERACTIVE_CLI.ja.md)を参照してください。
+
+'''
+              marker = "## License\n"
+              readme.write_text(text.replace(marker, section + marker, 1) if marker in text else text.rstrip() + "\n\n" + section, encoding="utf-8")
+
+          docs_index = Path("docs/README.md")
+          text = docs_index.read_text(encoding="utf-8")
+          if "INTERACTIVE_CLI.ja.md" not in text:
+              docs_index.write_text(text.rstrip() + '''
+
+## 対話操作
+
+- [対話CLI](INTERACTIVE_CLI.ja.md) — TTYメニュー、既存CLIとの互換性、確認語、操作範囲
+''', encoding="utf-8")
+
+          quickstart = Path("docs/QUICKSTART.ja.md")
+          text = quickstart.read_text(encoding="utf-8")
+          if "## 対話CLIで進める場合" not in text:
+              section = '''## 対話CLIで進める場合
+
+CLIインストール後、TTYで`runnerloom`を引数なしで実行するか、`runnerloom interactive`を実行すると、同じサブコマンドを対話メニューから選べます。
+
+```bash
+sudo runnerloom --state /var/lib/runnerloom/controller
+```
+
+このQuick Startは、各操作の意味と完了条件を確認するため引き続き上から読んでください。対話モードでも`setup`だけでGitHub、Network、Service、実Jobまで完成したとは扱いません。詳細は[対話CLIガイド](INTERACTIVE_CLI.ja.md)を参照してください。
+
+'''
+              marker = "## このガイドの完了条件\n"
+              if marker not in text:
+                  raise SystemExit("Quick Start marker missing")
+              quickstart.write_text(text.replace(marker, section + marker, 1), encoding="utf-8")
+
+          checker = Path("scripts/check-docs.py")
+          text = checker.read_text(encoding="utf-8")
+          entry = '    ROOT / "docs" / "INTERACTIVE_CLI.ja.md",\n'
+          if entry not in text:
+              for marker in ('    ROOT / "docs" / "CACHE.ja.md",\n', '    ROOT / "docs" / "TROUBLESHOOTING.ja.md",\n', '    ROOT / "docs" / "README.md",\n'):
+                  if marker in text:
+                      checker.write_text(text.replace(marker, marker + entry, 1), encoding="utf-8")
+                      break
+              else:
+                  raise SystemExit("docs checker marker missing")
+
+          for path in (Path("scripts/package.py"), Path("scripts/test_package.py")):
+              text = path.read_text(encoding="utf-8")
+              if "INTERACTIVE_CLI.ja.md" in text:
+                  continue
+              for old, new in (
+                  ('"docs/CACHE.ja.md",', '"docs/CACHE.ja.md",\n        "docs/INTERACTIVE_CLI.ja.md",'),
+                  ('"CACHE.ja.md",', '"CACHE.ja.md",\n        "INTERACTIVE_CLI.ja.md",'),
+                  ("'docs/CACHE.ja.md',", "'docs/CACHE.ja.md',\n        'docs/INTERACTIVE_CLI.ja.md',"),
+                  ("'CACHE.ja.md',", "'CACHE.ja.md',\n        'INTERACTIVE_CLI.ja.md',"),
+              ):
+                  if old in text:
+                      path.write_text(text.replace(old, new, 1), encoding="utf-8")
+                      break
+          PY
+
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("internal/cli/interactive_test.go")
+          text = path.read_text(encoding="utf-8")
+          text = text.replace('"10\\n2\\n/tmp/node state/agent.json\\n0\\n4\\n4\\nAPPLY NETWORK\\n0\\n0\\n"', '"10\\n2\\n/tmp/node state/agent.json\\n0\\n4\\n4\\n\\nAPPLY NETWORK\\n0\\n0\\n"')
+          text = text.replace("root.SetArgs(nil)", "root.SetArgs([]string{})")
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          gofmt -w internal/cli/cli.go internal/cli/setup.go internal/cli/interactive.go internal/cli/interactive_test.go
+          go mod tidy
+
+      - name: Validate pre-review source and distributables
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat VERSION)" = "0.1.0-rc.4"
+          test -z "$(gofmt -l cmd internal)"
+          python3 scripts/check-docs.py
+          git diff --check
+          go vet ./...
+          go test -race -count=1 ./...
+          go mod vendor
+          python3.12 scripts/package.py --deb
+          python3.12 scripts/test_package.py dist
+          git diff --exit-code -- go.mod go.sum
+
+          stage="$RUNNER_TEMP/pre-review-package"
+          mkdir -p "$stage"
+          tar -xzf dist/runnerloom-*-linux-amd64.tar.gz -C "$stage"
+          guide="$(find "$stage" -path '*/docs/INTERACTIVE_CLI.ja.md' -type f -print -quit)"
+          binary="$(find "$stage" -path '*/runnerloom' -type f -print -quit)"
+          test -n "$guide"
+          test -n "$binary"
+          "$binary" --json --help | grep -q 'runnerloom interactive'
+
+          timeout 5 "$binary" </dev/null >"$RUNNER_TEMP/no-tty.out" 2>"$RUNNER_TEMP/no-tty.err"
+          grep -q 'Usage:' "$RUNNER_TEMP/no-tty.out" "$RUNNER_TEMP/no-tty.err"
+          ! grep -q 'メインメニュー' "$RUNNER_TEMP/no-tty.out" "$RUNNER_TEMP/no-tty.err"
+
+          set +e
+          timeout 5 "$binary" interactive </dev/null >"$RUNNER_TEMP/explicit.out" 2>"$RUNNER_TEMP/explicit.err"
+          explicit_code=$?
+          set -e
+          test "$explicit_code" -ne 0
+          test "$explicit_code" -ne 124
+          grep -q 'TTY_REQUIRED' "$RUNNER_TEMP/explicit.err"
+
+          printf '0\n' | script -qfec "$binary" /dev/null >"$RUNNER_TEMP/tty-menu.out"
+          grep -q 'メインメニュー' "$RUNNER_TEMP/tty-menu.out"
+          script -qfec "$binary version" /dev/null </dev/null >"$RUNNER_TEMP/tty-version.out"
+          ! grep -q 'メインメニュー' "$RUNNER_TEMP/tty-version.out"
+
+      - name: Publish clean PR head
+        id: head
+        shell: bash
+        run: |
+          set -euo pipefail
+          find .github/workflows -maxdepth 1 -type f -name 'internal-*.yml' -delete
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat(cli): add safe guided interactive mode'
+            git push origin HEAD:feat/interactive-cli-rc4
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          test -z "$(find .github/workflows -maxdepth 1 -type f -name 'internal-*.yml' -print -quit)"
+
+      - name: Gate on CodeRabbit review
+        id: review
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+            [ "$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json headRefOid --jq .headRefOid)" = "$HEAD_SHA" ] && break
+            sleep 2
+          done
+          test "$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json headRefOid --jq .headRefOid)" = "$HEAD_SHA"
+
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body '@coderabbitai review
+
+Please review the final clean RC.4 head. Focus on TTY routing, JSON/non-interactive compatibility, argument boundaries, confirmation gates, EOF behavior, recursive Cobra construction, and package contents.'
+
+          covered=""
+          for _ in $(seq 1 120); do
+            reviews="$(gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews")"
+            current="$(printf '%s' "$reviews" | jq -s --arg head "$HEAD_SHA" '[.[][] | select(.user.login == "coderabbitai[bot]" and .commit_id == $head)] | length')"
+            if [ "$current" -gt 0 ]; then
+              covered="$HEAD_SHA"
+              break
+            fi
+            latest="$(printf '%s' "$reviews" | jq -rs '[.[][] | select(.user.login == "coderabbitai[bot]")] | sort_by(.submitted_at) | last | .commit_id // empty')"
+            if [ -n "$latest" ] && git cat-file -e "$latest^{commit}" 2>/dev/null && git merge-base --is-ancestor "$latest" "$HEAD_SHA"; then
+              remaining="$(git diff --name-only "$latest..$HEAD_SHA" | grep -Ev '^\.github/workflows/internal-[^/]+\.ya?ml$' || true)"
+              if [ -z "$remaining" ]; then
+                covered="$latest"
+                break
+              fi
+            fi
+            sleep 10
+          done
+          test -n "$covered"
+
+          unresolved_file="$RUNNER_TEMP/unresolved-review-threads.txt"
+          gh api graphql --paginate \
+            -f owner='MOVEI144' -f name='RunnerLoom' -F number="$PR_NUMBER" \
+            -f query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:1){nodes{url}}}pageInfo{hasNextPage endCursor}}}}}' \
+            --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | .comments.nodes[0].url' > "$unresolved_file"
+          if [ -s "$unresolved_file" ]; then
+            gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body "RC.4 merge gate stopped because unresolved review threads remain:\n\n$(cat "$unresolved_file")"
+            exit 1
+          fi
+          echo "covered_by=$covered" >> "$GITHUB_OUTPUT"
+
+      - name: Merge reviewed pull request
+        id: merge
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json headRefOid,state --jq '.headRefOid + " " + .state')" = "$HEAD_SHA OPEN"
+          gh pr merge "$PR_NUMBER" --repo "$REPOSITORY" --squash \
+            --subject 'feat(cli): add safe guided interactive mode (#14)' \
+            --body 'Add a TTY-only guided CLI while preserving explicit subcommands, JSON output, and non-interactive automation. Destructive and host-changing operations retain previews, exact confirmations, and existing fail-closed safety checks.'
+          merge_sha="$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json mergeCommit --jq .mergeCommit.oid)"
+          test -n "$merge_sha"
+          echo "sha=$merge_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch and await full main CI
+        id: qualification
+        shell: bash
+        env:
+          MERGE_SHA: ${{ steps.merge.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags
+          git checkout --detach origin/main
+          test "$(git rev-parse HEAD)" = "$MERGE_SHA"
+          test "$(cat VERSION)" = "0.1.0-rc.4"
+          test -z "$(find .github/workflows -maxdepth 1 -type f -name 'internal-*.yml' -print -quit)"
+
+          gh workflow run ci.yml --repo "$REPOSITORY" --ref main
+          run_id=""
+          for _ in $(seq 1 60); do
+            run_id="$(gh run list --repo "$REPOSITORY" --workflow ci.yml --branch main --event workflow_dispatch --limit 30 --json databaseId,headSha --jq ".[] | select(.headSha == \"$MERGE_SHA\") | .databaseId" | head -n1)"
+            [ -n "$run_id" ] && break
+            sleep 5
+          done
+          test -n "$run_id"
+          gh run watch "$run_id" --repo "$REPOSITORY" --exit-status
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Build release assets from merged source
+        id: assets
+        shell: bash
+        env:
+          MERGE_SHA: ${{ steps.merge.outputs.sha }}
+        run: |
+          set -euo pipefail
+          rm -rf dist vendor
+          test -z "$(gofmt -l cmd internal)"
+          python3 scripts/check-docs.py
+          go vet ./...
+          go test -race -count=1 ./...
+          go mod vendor
+          python3.12 scripts/package.py --deb
+          python3.12 scripts/test_package.py dist
+          git diff --exit-code -- go.mod go.sum
+
+          mapfile -t archives < <(find dist -maxdepth 1 -type f -name 'runnerloom-*-linux-amd64.tar.gz' -print)
+          mapfile -t debs < <(find dist -maxdepth 1 -type f -name 'runnerloom_*_amd64.deb' -print)
+          mapfile -t infos < <(find dist -maxdepth 1 -type f -name 'runnerloom-*-buildinfo.json' -print)
+          test "${#archives[@]}" -eq 1
+          test "${#debs[@]}" -eq 1
+          test "${#infos[@]}" -eq 1
+          test -f dist/SHA256SUMS
+          jq -e --arg commit "$MERGE_SHA" '.sourceCommit == $commit' "${infos[0]}" >/dev/null
+          (cd dist && sha256sum --check SHA256SUMS)
+          printf '%s\n' "${archives[0]}" "${debs[0]}" "${infos[0]}" dist/SHA256SUMS > "$RUNNER_TEMP/release-assets.txt"
+
+      - name: Publish and verify v0.1.0-rc.4
+        id: release
+        shell: bash
+        env:
+          MERGE_SHA: ${{ steps.merge.outputs.sha }}
+          QUALIFICATION_RUN: ${{ steps.qualification.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          ! gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1
+          git tag -a "$RELEASE_TAG" "$MERGE_SHA" -m 'RunnerLoom 0.1.0-rc.4'
+          git push origin "$RELEASE_TAG"
+
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          ## RunnerLoom 0.1.0-rc.4
+
+          Adds a guided TTY interactive CLI while preserving explicit subcommands, stable JSON output, and non-interactive automation.
+
+          - Menu entry through \`runnerloom\`, \`runnerloom interactive\`, or \`runnerloom menu\` on a TTY.
+          - Guided setup, diagnostics, Image/Cache, Network, Service, Node, VM, GitHub, Backup, and Maintenance operations.
+          - Dry-run previews and exact confirmation phrases before destructive or host-changing operations.
+          - User values are passed as argument boundaries to existing Cobra commands; no shell evaluation is introduced.
+          - Non-TTY, \`--json\`, \`--non-interactive\`, and explicit subcommands remain compatible.
+
+          Source: \`$MERGE_SHA\`
+          Pull request: https://github.com/$REPOSITORY/pull/$PR_NUMBER
+          Full qualification: https://github.com/$REPOSITORY/actions/runs/$QUALIFICATION_RUN
+          EOF
+
+          mapfile -t assets < "$RUNNER_TEMP/release-assets.txt"
+          gh release create "$RELEASE_TAG" "${assets[@]}" --repo "$REPOSITORY" --verify-tag \
+            --target "$MERGE_SHA" --title 'RunnerLoom 0.1.0-rc.4' \
+            --notes-file "$RUNNER_TEMP/release-notes.md" --prerelease
+
+          release_url="$(gh release view "$RELEASE_TAG" --repo "$REPOSITORY" --json url --jq .url)"
+          test -n "$release_url"
+          test "$(git rev-list -n1 "$RELEASE_TAG")" = "$MERGE_SHA"
+
+          verify="$RUNNER_TEMP/release-download"
+          mkdir -p "$verify"
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" --dir "$verify"
+          (cd "$verify" && sha256sum --check SHA256SUMS)
+          archive="$(find "$verify" -maxdepth 1 -type f -name 'runnerloom-*-linux-amd64.tar.gz' -print -quit)"
+          mkdir -p "$verify/extracted"
+          tar -xzf "$archive" -C "$verify/extracted"
+          binary="$(find "$verify/extracted" -path '*/runnerloom' -type f -print -quit)"
+          guide="$(find "$verify/extracted" -path '*/docs/INTERACTIVE_CLI.ja.md' -type f -print -quit)"
+          test -n "$binary"
+          test -n "$guide"
+          "$binary" version --json | jq -e '.version == "0.1.0-rc.4" or .data.version == "0.1.0-rc.4"' >/dev/null
+          "$binary" --json --help | grep -q 'runnerloom interactive'
+
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body "Merged as \`$MERGE_SHA\`; full main CI passed in run $QUALIFICATION_RUN; RC.4 was published, downloaded again, and checksum/package verified: $release_url"
+          echo "url=$release_url" >> "$GITHUB_OUTPUT"
