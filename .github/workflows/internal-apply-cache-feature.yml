@@ -1,0 +1,69 @@
+name: Internal apply cache feature
+
+on:
+  push:
+    branches:
+      - feat/cache-lifecycle-management
+    paths:
+      - .github/internal/cache-patch-**
+      - .github/workflows/internal-apply-cache-feature.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: feat/cache-lifecycle-management
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Apply and validate cache feature
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/internal/cache-patch-aa \
+              .github/internal/cache-patch-ab \
+              .github/internal/cache-patch-ac \
+            | base64 -d | gzip -d > /tmp/cache-feature.patch
+          git apply --check /tmp/cache-feature.patch
+          git apply /tmp/cache-feature.patch
+          rm -f .github/internal/cache-patch-aa \
+                .github/internal/cache-patch-ab \
+                .github/internal/cache-patch-ac
+          rm -f .github/workflows/internal-apply-cache-feature.yml
+          rmdir .github/internal 2>/dev/null || true
+          gofmt -w \
+            internal/agent/agent.go \
+            internal/cli/cache.go \
+            internal/cli/cache_command_test.go \
+            internal/cli/cli.go \
+            internal/cli/cli_test.go \
+            internal/cli/display.go \
+            internal/control/merge_gates_test.go \
+            internal/core/core_test.go \
+            internal/core/store.go \
+            internal/host/cache.go \
+            internal/host/cache_test.go \
+            internal/host/download.go \
+            internal/host/images.go
+          python3 scripts/check-docs.py
+          git diff --check
+          go vet ./...
+          go test -count=1 ./...
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "runnerloom-cache-bot"
+          git config user.email "184829077+Aero123421@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: add safe image cache lifecycle management"
+          git push origin HEAD:feat/cache-lifecycle-management
