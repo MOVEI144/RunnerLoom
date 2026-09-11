@@ -147,7 +147,7 @@ serviceInstalled: false
 credential JSONの全文を表示しないでください。Client ID、Installation ID、参照先pathは秘密鍵本文ではありませんが、共有用診断には不要な識別情報です。次の確認は値を表示せず、構造・権限・参照先の可読性だけを検査します。
 
 ```bash
-credential_file="/var/lib/runnerloom/controller/github-credentials.json"
+credential_file="$RL_CONTROLLER_STATE/github-credentials.json"
 
 sudo jq -e '
   ((keys | sort) == ["tokenFile"] and

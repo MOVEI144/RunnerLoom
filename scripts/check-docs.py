@@ -53,7 +53,11 @@ def prose_without_fences(lines: list[str], relative: Path, errors: list[str]) ->
             marker = (token[0], len(token))
             if fence is None:
                 fence = marker
-            elif marker[0] == fence[0] and marker[1] >= fence[1]:
+            elif (
+                marker[0] == fence[0]
+                and marker[1] >= fence[1]
+                and not line[match.end() :].strip()
+            ):
                 fence = None
             continue
         if fence is None:

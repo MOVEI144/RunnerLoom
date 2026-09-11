@@ -144,7 +144,7 @@ Organization
 
 ```bash
 org="OWNER"
-gh api "/orgs/$org/actions/runner-groups" \
+gh api --paginate "/orgs/$org/actions/runner-groups?per_page=100" \
   --jq '.runner_groups[] | [.id, .name, .visibility] | @tsv'
 ```
 
@@ -197,12 +197,16 @@ sudoedit "$RL_CONTROLLER_STATE/github-credentials.json"
 確認します。
 
 ```bash
+credential_file="$RL_CONTROLLER_STATE/github-credentials.json"
+
 sudo jq -e '
   (.clientID | type == "string" and length > 0) and
   (.installationID | type == "number" and . > 0) and
   (.privateKeyFile | type == "string" and startswith("/"))
-' "$RL_CONTROLLER_STATE/github-credentials.json" >/dev/null
-sudo test -r "$RL_CONTROLLER_STATE/github-app.pem"
+' "$credential_file" >/dev/null
+
+private_key_file="$(sudo jq -er '.privateKeyFile' "$credential_file")"
+sudo test -r "$private_key_file"
 echo 'GitHub App credential files: readable'
 ```
 
@@ -225,7 +229,13 @@ sudo test -f "$RL_IMAGE.manifest.json"
 sudo jq '{digest, runnerVersion, os, architecture, registered}' \
   "$RL_IMAGE.manifest.json"
 
-export RL_IMAGE_DIGEST="$(sudo jq -er .digest "$RL_IMAGE.manifest.json")"
+export RL_IMAGE_DIGEST="$(
+  sudo jq -er '
+    .digest
+    | strings
+    | select(test("^sha256:[0-9a-f]{64}$"))
+  ' "$RL_IMAGE.manifest.json"
+)"
 printf '%s\n' "$RL_IMAGE_DIGEST"
 ```
 
