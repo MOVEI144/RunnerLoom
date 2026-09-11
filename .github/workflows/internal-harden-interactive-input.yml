@@ -1,0 +1,158 @@
+name: Internal harden interactive input
+
+on:
+  push:
+    branches: [feat/interactive-cli-rc4]
+    paths:
+      - .github/workflows/internal-harden-interactive-input.yml
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Wait for branch writers other than the release gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          BRANCH: feat/interactive-cli-rc4
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            active="$({ gh run list --repo "$REPO" --branch "$BRANCH" --limit 100 --json databaseId,status,name || echo '[]'; } | jq --argjson self "$GITHUB_RUN_ID" '[.[] | select(.databaseId != $self and .name != "Internal release interactive CLI rc4" and (.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "requested" or .status == "waiting"))] | length')"
+            test "$active" -eq 0 && exit 0
+            sleep 10
+          done
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feat/interactive-cli-rc4
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Harden dynamic terminal output and enrollment IDs
+        run: |
+          set -euo pipefail
+          git fetch origin feat/interactive-cli-rc4
+          git reset --hard origin/feat/interactive-cli-rc4
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('internal/cli/interactive.go')
+          text = path.read_text(encoding='utf-8')
+          text = text.replace(
+              'fmt.Fprintf(a.Err, "%s: ", label)',
+              'fmt.Fprintf(a.Err, "%s: ", interactiveSafe(label))',
+          )
+          text = text.replace(
+              'fmt.Fprintf(a.Err, "%s [%s]: ", label, interactiveSafe(fallback))',
+              'fmt.Fprintf(a.Err, "%s [%s]: ", interactiveSafe(label), interactiveSafe(fallback))',
+          )
+          text = text.replace(
+              'fmt.Fprintf(a.Err, "\\n%s\\n", title)',
+              'fmt.Fprintf(a.Err, "\\n%s\\n", interactiveSafe(title))',
+          )
+          text = text.replace(
+              'fmt.Fprintf(a.Err, "  %s. %s\\n", item.Key, item.Label)',
+              'fmt.Fprintf(a.Err, "  %s. %s\\n", interactiveSafe(item.Key), interactiveSafe(item.Label))',
+          )
+          text = text.replace(
+              'fmt.Fprintf(a.Err, "\\n%s\\n", summary)',
+              'fmt.Fprintf(a.Err, "\\n%s\\n", interactiveSafe(summary))',
+          )
+
+          marker = '''func (a *App) interactiveDuration(label string, fallback time.Duration, minimum, maximum time.Duration) (time.Duration, error) {\n'''
+          helper = '''func (a *App) interactiveID(label string) (string, error) {\n\tfor {\n\t\tvalue, err := a.interactiveRequired(label, "")\n\t\tif err != nil {\n\t\t\treturn "", err\n\t\t}\n\t\tif core.ValidID(value) {\n\t\t\treturn value, nil\n\t\t}\n\t\t_, _ = fmt.Fprintln(a.Err, "32桁の小文字16進数IDを入力してください。")\n\t}\n}\n\n'''
+          if 'func (a *App) interactiveID(' not in text:
+              if marker not in text:
+                  raise SystemExit('interactiveID insertion marker missing')
+              text = text.replace(marker, helper + marker, 1)
+          text = text.replace(
+              'id, promptErr := a.interactiveRequired("承認する申請ID", "")',
+              'id, promptErr := a.interactiveID("承認する申請ID")',
+              1,
+          )
+          required = [
+              'interactiveSafe(label)',
+              'interactiveSafe(summary)',
+              'func (a *App) interactiveID(',
+              'a.interactiveID("承認する申請ID")',
+          ]
+          for value in required:
+              if value not in text:
+                  raise SystemExit(f'missing hardening marker: {value}')
+          path.write_text(text, encoding='utf-8')
+
+          test_path = Path('internal/cli/interactive_security_test.go')
+          test_path.write_text(r'''package cli
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
+
+func TestInteractivePromptEscapesDynamicLabel(t *testing.T) {
+	var out, errOut bytes.Buffer
+	a := &App{In: strings.NewReader("\n"), Out: &out, Err: &errOut}
+	if _, err := a.interactivePrompt("unsafe\x1b[31m-label", "fallback"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsRune(errOut.String(), '\x1b') {
+		t.Fatalf("terminal escape reached output: %q", errOut.String())
+	}
+}
+
+func TestInteractiveConfirmationEscapesDynamicPhrase(t *testing.T) {
+	var out, errOut bytes.Buffer
+	a := &App{In: strings.NewReader("cancel\n"), Out: &out, Err: &errOut}
+	ok, err := a.interactiveConfirm("summary\x1b[2J", "APPROVE \x1b[31m")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("wrong confirmation was accepted")
+	}
+	if strings.ContainsRune(errOut.String(), '\x1b') {
+		t.Fatalf("terminal escape reached confirmation output: %q", errOut.String())
+	}
+}
+
+func TestInteractiveIDRejectsInvalidThenAcceptsValid(t *testing.T) {
+	const valid = "0123456789abcdef0123456789abcdef"
+	var out, errOut bytes.Buffer
+	a := &App{In: strings.NewReader("not-an-id\n" + valid + "\n"), Out: &out, Err: &errOut}
+	got, err := a.interactiveID("申請ID")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != valid {
+		t.Fatalf("got %q want %q", got, valid)
+	}
+}
+''', encoding='utf-8')
+
+          Path('.github/workflows/internal-harden-interactive-input.yml').unlink()
+          PY
+          gofmt -w internal/cli/interactive.go internal/cli/interactive_security_test.go
+          go mod tidy
+      - name: Validate hardening
+        run: |
+          set -euo pipefail
+          python3 scripts/check-docs.py
+          git diff --check
+          go vet ./...
+          go test -race -count=1 ./...
+      - name: Commit verified hardening
+        run: |
+          set -euo pipefail
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix(cli): harden interactive input and terminal output'
+          git push origin HEAD:feat/interactive-cli-rc4
