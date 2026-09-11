@@ -1,0 +1,51 @@
+name: Internal apply quarantine TOCTOU hardening
+
+on:
+  push:
+    branches:
+      - feat/cache-lifecycle-management
+    paths:
+      - .github/internal/quarantine-toctou.patch
+      - .github/workflows/internal-apply-quarantine-toctou.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: feat/cache-lifecycle-management
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Apply and validate final hardening
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' '7075dda5a9e0dd20064ba64bc77206ad63e126dfc1bfa6ce6afefead6d0038d7' .github/internal/quarantine-toctou.patch | sha256sum --check -
+          git apply --check .github/internal/quarantine-toctou.patch
+          git apply .github/internal/quarantine-toctou.patch
+          rm -f .github/internal/quarantine-toctou.patch
+          rm -f .github/workflows/internal-apply-quarantine-toctou.yml
+          rmdir .github/internal 2>/dev/null || true
+          gofmt -w internal/host/cache.go
+          python3 scripts/check-docs.py
+          git diff --check
+          go vet ./...
+          go test -count=1 ./...
+      - name: Commit and push
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'runnerloom-cache-bot'
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: revalidate corrupt images before quarantine'
+          git push origin HEAD:feat/cache-lifecycle-management
