@@ -1,33 +1,58 @@
 # RunnerLoom
 
-**Ephemeral GitHub Actions runners on your own machines.**
+自宅・社内の **Ubuntuマシン** を、GitHub Actions向けの使い捨てVM Runner群として使うための基盤です。Jobごとに新しいVMを作成し、終了後はホスト側で停止・削除を確認してから資源を解放します。
 
-RunnerLoom provisions a fresh Ubuntu VM for each GitHub Actions job, places it on an eligible LAN server, and removes the VM after the host confirms completion. One machine can be both controller and worker; additional workers use the same CLI and connect outbound over mutually authenticated TLS.
+> Run each GitHub Actions job in a fresh VM on your own Ubuntu machines.
 
-[Install / upgrade](docs/INSTALL.md) · [日本語セットアップガイド](docs/QUICKSTART.ja.md) · [Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md) · [Verification and limitations](docs/VERIFICATION.md)
+[Releases](https://github.com/MOVEI144/RunnerLoom/releases) · [ドキュメント一覧](docs/README.md) · [1台構成セットアップ](docs/QUICKSTART.ja.md) · [Security](SECURITY.md) · [検証済み範囲](docs/VERIFICATION.md)
+
+> [!IMPORTANT]
+> 現在はリリース候補です。対象は **Ubuntu 24.04 x86_64 / CPU VM / 信頼できる管理者 / 明示的に許可した非公開Repository** です。GPU passthrough、Windows/macOSホスト、Controller HA、公開fork由来のJobは対象外です。
+
+## 迷ったらここから
+
+| やりたいこと | 読むページ |
+|---|---|
+| まず何をするソフトか知りたい | このREADMEの「仕組み」 |
+| CLIをインストール・更新・削除したい | [INSTALL.md](docs/INSTALL.md) |
+| 1台のPCで最初のJobを動かしたい | [QUICKSTART.ja.md](docs/QUICKSTART.ja.md) |
+| セットアップ中のエラーを解決したい | [TROUBLESHOOTING.ja.md](docs/TROUBLESHOOTING.ja.md) |
+| 2台目以降のNodeを追加したい | [MULTI_NODE.ja.md](docs/MULTI_NODE.ja.md) |
+| drain、停止、バックアップ、更新をしたい | [OPERATIONS.ja.md](docs/OPERATIONS.ja.md) |
+| 設計・安全性・検証境界を確認したい | [ARCHITECTURE.md](docs/ARCHITECTURE.md) / [SECURITY.md](SECURITY.md) / [VERIFICATION.md](docs/VERIFICATION.md) |
+
+## 仕組み
 
 ```text
-GitHub Actions — outbound HTTPS — Controller
-                                     │
-                       outbound mTLS from each Node
-                          ┌──────────┴──────────┐
-                       Node A                 Node B
-                      libvirt/KVM            libvirt/KVM
-                     fresh VM → delete     fresh VM → delete
+GitHub Actions
+      │  outbound HTTPS
+      ▼
+ Controller ── 配置判断・状態・GitHub連携・SQLite
+      ▲
+      │  Nodeからのoutbound mTLS
+ ┌────┴────────────┐
+ ▼                 ▼
+Node A            Node B
+libvirt/KVM       libvirt/KVM
+新規VM → Job → 削除  新規VM → Job → 削除
 ```
 
-## What is implemented
+1. ControllerがGitHubから必要なRunner数を受け取ります。
+2. CPU・RAM・ディスク、Pool、予約枠、イメージ、Node状態を照合して配置先を決めます。
+3. Node上でGolden Imageからqcow2 overlayを作り、1 Job専用のJIT設定でRunnerを起動します。
+4. Job終了後、ホストが停止と所有権を確認してからVM・作業ディスクを削除します。
 
-- An operational Go CLI: interactive or JSON setup, configuration plans, enrollment, services, diagnostics and VM recovery.
-- Official `actions/scaleset` integration: scale-set sessions, demand, durable message processing before acknowledgment, and one-job JIT configurations.
-- SQLite transactions for shared CPU/RAM/disk accounting, hard reservations, operation replay protection and restart recovery.
-- Approved node enrollment, pinned TLS 1.3, certificate renewal and per-request revocation checks. No remote administrative API for node credentials.
-- Real libvirt VM creation, qcow2 overlays, cloud-init provisioning, bounded serial diagnostics, resource limits and owned-resource cleanup.
-- Golden Image construction from a signature-verified Ubuntu image and a digest-verified official GitHub runner. No runner registration or controller key is baked into images.
-- Dedicated NAT and firewall rules blocking guest access to private networks, host administration and other runner VMs. NAT alone is not treated as isolation.
-- systemd installation with a non-root controller and a trusted privileged host agent.
+### 用語
 
-A pool is an administrator-defined execution environment, not a request for arbitrary CPU/RAM from workflow code:
+| 用語 | 意味 |
+|---|---|
+| **Controller** | GitHub連携、配置判断、状態DB、Node認証を担当する管理プロセス |
+| **Node / Agent** | VM、libvirt、専用ネットワーク、ローカル資源を管理する実行マシン |
+| **Pool** | 1台のVMに割り当てるCPU・RAM・ディスク・最大台数・Runner名の定義 |
+| **Golden Image** | Ubuntuと公式Actions Runnerを入れた、未登録の読み取り専用元イメージ |
+| **Reservation** | 特定Pool用にNode資源を取り置く管理者定義の枠 |
+
+Workflowから任意のCPU量を指定するのではなく、管理者が事前に定義したPoolを `runs-on` で選びます。
 
 ```yaml
 jobs:
@@ -37,33 +62,69 @@ jobs:
       - run: python3 --version
 ```
 
-## Install
+## 1台で使い始める流れ
 
-Download the versioned `linux-amd64.tar.gz` or `.deb` from Releases and verify `SHA256SUMS`. Go is not needed for a packaged binary. Installation **does not** start services, enroll a node or modify networking. The private repository must first be made public by its owner before anonymous downloads work.
+最初は1台のUbuntu PCをControllerとNodeの兼用にすると、構成を理解しやすくなります。
+
+```text
+1. CLIとホスト依存関係を入れる
+2. GitHub AppとRunner Groupを用意する
+3. Golden Imageを作る
+4. setupでPoolと資源上限を決め、設定・CA・Node IDを保存する
+5. image importとnetwork applyを明示実行する
+6. github check後にController/Agentを起動する
+7. 手動Workflowを実行し、VM削除まで確認する
+```
+
+コマンド、置換する値、各段階の成功条件は [1台構成セットアップ](docs/QUICKSTART.ja.md) にまとめています。
+
+> [!WARNING]
+> `runnerloom setup --apply` は「すべて完了」を意味しません。設定、Controller CA、Node IDを保存しますが、GitHub接続確認、VMネットワーク変更、サービス起動、実Job検証は別の明示操作です。
+
+## どの操作がホストを変更するか
+
+| 操作 | 変更内容 |
+|---|---|
+| `.deb` / archiveのインストール | CLIバイナリと文書を配置。サービス・ネットワークは起動しない |
+| `setup --apply` | 指定したstate directoryへ設定、CA、Node IDを保存 |
+| `image build` | 指定先へGolden Imageとmanifestを新規作成 |
+| `image import` | Controllerの配布用Image cacheへ検証済みイメージを登録 |
+| `network apply` | RunnerLoom専用libvirt networkとfirewall規則を作成 |
+| `service install --start` | RunnerLoom用systemd unitを生成して起動 |
+| GitHub Job | 使い捨てVMと作業ディスクを作成し、完了後に所有確認して削除 |
+
+RunnerLoomはインストールだけで既存ネットワークを書き換えたり、Nodeを勝手に登録したり、サービスを自動起動したりしません。
+
+## 主な機能
+
+- 1台兼用からLAN内の複数Nodeまで同じCLIで管理
+- official `actions/scaleset`連携と1 Job専用JIT設定
+- SQLite transactionによるCPU・RAM・ディスク会計、予約枠、再実行保護
+- Node承認、TLS 1.3、証明書更新、失効確認
+- libvirt/KVM、qcow2 overlay、cloud-init、所有権を確認したcleanup
+- Canonical署名とRunner digestを検証するGolden Image builder
+- LAN、ホスト管理面、peer VMへの到達を制限する専用NAT/firewall
+- 人間向けCLIと、`--json` / JSON Schemaによる自動化向けインターフェース
+
+## 配布物
+
+GitHub ReleasesにはLinux/amd64 archive、Debian package、build information、`SHA256SUMS`があります。Repositoryが非公開の場合でも、公開化は必須ではありません。ログイン済みブラウザまたは認証済みGitHub CLIで取得できます。
+
+インストール後は次だけ確認し、その後 [Quickstart](docs/QUICKSTART.ja.md) へ進みます。
 
 ```bash
 runnerloom version --json
 runnerloom doctor
-runnerloom config schema > cluster.schema.json
-```
-
-See [installation, verification and safe upgrades](docs/INSTALL.md).
-
-## Start here
-
-Use the [Japanese quickstart](docs/QUICKSTART.ja.md) for the complete sequence, required host packages, GitHub permissions and storage layout. `setup` does not falsely claim that writing a configuration has completed GitHub or VM verification.
-
-```bash
-runnerloom doctor
-runnerloom config sample > cluster.json
-runnerloom config validate --file cluster.json --json
-runnerloom setup --file cluster.json --role controller-node --apply
 runnerloom --help --json
 ```
 
-Replace the sample image digest and machine budgets before use. First-time GitHub App installation/authorization is required; RunnerLoom does not extract or reuse your existing login token.
+## 安全性と対応範囲
 
-## Development
+RunnerLoomは、ホスト管理者まで敵対する環境や、すべてのhypervisor脆弱性からの保護を保証するものではありません。現在のAgentはlibvirtとfirewallを操作する信頼済み特権プロセスであり、独立監査済みのprivilege-separated helperではありません。
+
+価値のあるRepository secretsを接続する前に、[SECURITY.md](SECURITY.md) と [VERIFICATION.md](docs/VERIFICATION.md) を読み、実ホストでネットワーク隔離、再起動復旧、資源上限、実GitHub Job、Job後の削除を確認してください。
+
+## 開発
 
 ```bash
 go test -race -count=1 ./...
@@ -71,14 +132,8 @@ go vet ./...
 go build -trimpath -o runnerloom ./cmd/runnerloom
 ```
 
-CI additionally runs a real disposable Ubuntu VM on a GitHub-owned ephemeral runner. Unit/integration mocks and real-VM evidence are identified separately. CI artifacts include the Linux/amd64 CLI, checksums and VM diagnostic evidence.
-
-## Support boundary
-
-This is a release candidate, not a claim of complete production qualification or hostile multi-tenant security. The current target is **Ubuntu 24.04 x86_64, trusted administrators and explicitly allowed private repositories**. GPU passthrough, Windows/macOS hosts, automatic controller HA and public fork jobs are not enabled. Guest isolation does not protect against an already-compromised host administrator or every hypervisor vulnerability.
-
-Read [SECURITY.md](SECURITY.md) before connecting repositories or granting an agent host privileges. Repository visibility is an owner decision; adding an OSS license does not automatically publish a private repository.
+CIではunit/integration testに加え、実Ubuntu VM lifecycle、Golden Image build/boot、package、binary vulnerability scanを別々の証拠として扱います。
 
 ## License
 
-MIT. See [LICENSE](LICENSE). Third-party components keep their own licenses; image tooling downloads official upstream distributions rather than redistributing them in this repository.
+MIT。詳細は [LICENSE](LICENSE) を参照してください。第三者コンポーネントは各ライセンスに従います。
