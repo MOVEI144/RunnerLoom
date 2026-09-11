@@ -1,0 +1,148 @@
+name: Internal finalize interactive CLI v2
+
+on:
+  push:
+    branches: [feat/interactive-cli-rc4]
+    paths:
+      - .github/workflows/internal-finalize-interactive-rc4-v2.yml
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feat/interactive-cli-rc4
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Normalize the implementation and remove temporary machinery
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('.')
+          cli = root / 'internal/cli/cli.go'
+          interactive = root / 'internal/cli/interactive.go'
+          tests = root / 'internal/cli/interactive_test.go'
+
+          if not interactive.is_file() or not tests.is_file():
+              raise SystemExit('interactive implementation files are missing')
+
+          text = cli.read_text(encoding='utf-8')
+          old = '\troot.RunE = func(c *cobra.Command, _ []string) error { return c.Help() }\n'
+          new = ('\ta.addInteractive(root)\n'
+                 '\troot.RunE = func(c *cobra.Command, _ []string) error {\n'
+                 '\t\tif a.shouldStartInteractive() {\n'
+                 '\t\t\treturn a.runInteractive(c.Context())\n'
+                 '\t\t}\n'
+                 '\t\treturn c.Help()\n'
+                 '\t}\n')
+          if 'a.addInteractive(root)' not in text:
+              if old not in text:
+                  raise SystemExit('root command integration marker missing')
+              text = text.replace(old, new, 1)
+              cli.write_text(text, encoding='utf-8')
+
+          text = interactive.read_text(encoding='utf-8')
+          old_dispatch = ('\tif !containsStateFlag(args) {\n'
+                          '\t\tfull = append(full, "--state", a.State)\n'
+                          '\t}\n'
+                          '\tfull = append(full, args...)\n')
+          new_dispatch = ('\tif !containsStateFlag(args) {\n'
+                          '\t\tfull = append(full, "--state", a.State)\n'
+                          '\t}\n'
+                          '\tif !allowPrompts {\n'
+                          '\t\tfull = append(full, "--non-interactive")\n'
+                          '\t}\n'
+                          '\tfull = append(full, args...)\n')
+          if old_dispatch in text:
+              text = text.replace(old_dispatch, new_dispatch, 1)
+          if new_dispatch not in text:
+              raise SystemExit('explicit non-interactive nested dispatch is missing')
+          interactive.write_text(text, encoding='utf-8')
+
+          text = tests.read_text(encoding='utf-8')
+          if '"errors"' not in text:
+              text = text.replace('\t"context"\n', '\t"context"\n\t"errors"\n', 1)
+          text = text.replace(
+              'if err == nil || err.Error() != "boom" {',
+              'if !errors.Is(err, io.ErrUnexpectedEOF) {',
+              1,
+          )
+          if '!errors.Is(err, io.ErrUnexpectedEOF)' not in text:
+              raise SystemExit('reader failure assertion was not normalized')
+          tests.write_text(text, encoding='utf-8')
+
+          if (root / 'VERSION').read_text(encoding='utf-8').strip() != '0.1.0-rc.4':
+              (root / 'VERSION').write_text('0.1.0-rc.4\n', encoding='utf-8')
+
+          required = [
+              root / 'docs/INTERACTIVE_CLI.ja.md',
+              root / 'internal/cli/interactive_path_test.go',
+          ]
+          for path in required:
+              if not path.is_file():
+                  raise SystemExit(f'missing required file: {path}')
+
+          temporary = [
+              '.github/workflows/internal-source-export.yml',
+              '.github/workflows/internal-apply-interactive-rc4.yml',
+              '.github/workflows/internal-finalize-interactive-rc4.yml',
+              '.github/workflows/internal-fix-interactive-dispatch.yml',
+              '.github/workflows/internal-finalize-interactive-rc4-v2.yml',
+              'scripts/apply-interactive-rc4.py',
+          ]
+          for name in temporary:
+              (root / name).unlink(missing_ok=True)
+          PY
+          gofmt -w internal/cli/cli.go internal/cli/interactive.go internal/cli/interactive_test.go internal/cli/interactive_path_test.go
+          go mod tidy
+      - name: Validate documentation and clean diff
+        run: |
+          set -euo pipefail
+          python3 scripts/check-docs.py
+          git diff --check
+          test -f docs/INTERACTIVE_CLI.ja.md
+          grep -F 'a.addInteractive(root)' internal/cli/cli.go
+          grep -F 'full = append(full, "--non-interactive")' internal/cli/interactive.go
+          grep -Fx '0.1.0-rc.4' VERSION
+          ! find .github/workflows scripts -type f \( -name 'internal-*interactive*' -o -name 'apply-interactive-rc4.py' \) -print -quit | grep .
+      - name: Vet and race-test
+        run: |
+          go vet ./...
+          go test -race -count=1 ./...
+      - name: Build and verify release packages
+        run: |
+          python3 scripts/package.py --deb
+          python3 scripts/test_package.py dist
+          git diff --check
+      - name: Commit and push the verified tree
+        id: commit
+        env:
+          BRANCH: feat/interactive-cli-rc4
+        run: |
+          set -euo pipefail
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          if test -n "$(git status --porcelain)"; then
+            git commit -m 'feat(cli): finalize guarded interactive operator mode'
+            git push origin "HEAD:$BRANCH"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Record local qualification on the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          gh pr comment 14 --repo MOVEI144/RunnerLoom --body "Interactive CLI local qualification passed on \`$SHA\`: documentation validation, clean diff, gofmt/go mod tidy, go vet, race-enabled repository tests, and archive/Debian package verification. Temporary implementation workflows/scripts were removed from the proposed tree."
