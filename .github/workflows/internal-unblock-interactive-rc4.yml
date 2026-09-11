@@ -1,0 +1,52 @@
+name: Internal unblock interactive rc4
+
+on:
+  push:
+    branches: [feat/interactive-cli-rc4]
+    paths:
+      - .github/workflows/internal-unblock-interactive-rc4.yml
+
+permissions:
+  actions: write
+  contents: write
+
+jobs:
+  unblock:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Cancel superseded helper runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          BRANCH: feat/interactive-cli-rc4
+        run: |
+          set -euo pipefail
+          gh run list --repo "$REPO" --branch "$BRANCH" --limit 100 --json databaseId,name,status \
+            | jq -r '.[] | select((.name == "Internal harden interactive input" or .name == "Internal finalize interactive CLI v2" or .name == "Internal finalize interactive CLI" or .name == "Internal fix interactive dispatch" or .name == "Internal apply interactive CLI" or .name == "Internal release interactive CLI rc4") and (.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "waiting")) | .databaseId' \
+            | while read -r run_id; do
+                test -n "$run_id" && gh run cancel "$run_id" --repo "$REPO" || true
+              done
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feat/interactive-cli-rc4
+      - name: Remove superseded helper definitions
+        run: |
+          set -euo pipefail
+          git fetch origin feat/interactive-cli-rc4
+          git reset --hard origin/feat/interactive-cli-rc4
+          rm -f \
+            .github/workflows/internal-source-export.yml \
+            .github/workflows/internal-apply-interactive-rc4.yml \
+            .github/workflows/internal-finalize-interactive-rc4.yml \
+            .github/workflows/internal-finalize-interactive-rc4-v2.yml \
+            .github/workflows/internal-fix-interactive-dispatch.yml \
+            .github/workflows/internal-harden-interactive-input.yml \
+            .github/workflows/internal-release-interactive-rc4.yml \
+            .github/workflows/internal-unblock-interactive-rc4.yml
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'ci: remove superseded interactive helper workflows'
+          git push origin HEAD:feat/interactive-cli-rc4
