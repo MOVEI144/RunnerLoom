@@ -1,0 +1,262 @@
+name: Internal RC4 recover or verify
+
+on:
+  push:
+    branches: [feat/interactive-cli-rc4]
+    paths:
+      - .github/workflows/internal-rc4-recover-verify.yml
+
+permissions:
+  actions: write
+  checks: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  REPOSITORY: ${{ github.repository }}
+  PR_NUMBER: "14"
+  RELEASE_TAG: v0.1.0-rc.4
+
+jobs:
+  recover:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+
+      - name: Detect current publication state
+        id: state
+        shell: bash
+        run: |
+          set -euo pipefail
+          pr_state="$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json state --jq .state)"
+          echo "pr_state=$pr_state" >> "$GITHUB_OUTPUT"
+          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            echo 'release_exists=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'release_exists=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate open PR source
+        if: steps.state.outputs.release_exists != 'true' && steps.state.outputs.pr_state == 'OPEN'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(cat VERSION)" = "0.1.0-rc.4"
+          test -f internal/cli/interactive.go
+          test -f internal/cli/interactive_test.go
+          test -f docs/INTERACTIVE_CLI.ja.md
+          grep -q 'a.runInteractive(c.Context())' internal/cli/cli.go
+          grep -q 'a.addInteractive(root)' internal/cli/cli.go
+          grep -q 'sharedReader(a.In)' internal/cli/setup.go
+          grep -q 'func interactiveFormatValue' internal/cli/interactive.go
+          gofmt -w internal/cli/cli.go internal/cli/setup.go internal/cli/interactive.go internal/cli/interactive_test.go
+          go mod tidy
+          test -z "$(gofmt -l cmd internal)"
+          python3 scripts/check-docs.py
+          git diff --check
+          go vet ./...
+          go test -race -count=1 ./...
+          go mod vendor
+          python3.12 scripts/package.py --deb
+          python3.12 scripts/test_package.py dist
+          git diff --exit-code -- go.mod go.sum
+          stage="$RUNNER_TEMP/pre-merge"
+          mkdir -p "$stage"
+          tar -xzf dist/runnerloom-*-linux-amd64.tar.gz -C "$stage"
+          binary="$(find "$stage" -path '*/runnerloom' -type f -print -quit)"
+          guide="$(find "$stage" -path '*/docs/INTERACTIVE_CLI.ja.md' -type f -print -quit)"
+          test -n "$binary"
+          test -n "$guide"
+          "$binary" --json --help | grep -q 'runnerloom interactive'
+          timeout 5 "$binary" </dev/null | grep -q 'Usage:'
+          set +e
+          timeout 5 "$binary" interactive </dev/null >"$RUNNER_TEMP/non-tty.out" 2>"$RUNNER_TEMP/non-tty.err"
+          code=$?
+          set -e
+          test "$code" -ne 0
+          test "$code" -ne 124
+          grep -q 'TTY_REQUIRED' "$RUNNER_TEMP/non-tty.err"
+          printf '0\n' | script -qfec "$binary" /dev/null | grep -q 'メインメニュー'
+
+      - name: Publish clean open-PR head
+        if: steps.state.outputs.release_exists != 'true' && steps.state.outputs.pr_state == 'OPEN'
+        id: head
+        shell: bash
+        run: |
+          set -euo pipefail
+          find .github/workflows -maxdepth 1 -type f -name 'internal-*.yml' -delete
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          if ! git diff --cached --quiet; then
+            git commit -m 'feat(cli): finalize safe guided interactive mode'
+            git push origin HEAD:feat/interactive-cli-rc4
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          test -z "$(find .github/workflows -maxdepth 1 -type f -name 'internal-*.yml' -print -quit)"
+
+      - name: Review and merge open PR
+        if: steps.state.outputs.release_exists != 'true' && steps.state.outputs.pr_state == 'OPEN'
+        id: open_merge
+        shell: bash
+        env:
+          HEAD_SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 30); do
+            [ "$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json headRefOid --jq .headRefOid)" = "$HEAD_SHA" ] && break
+            sleep 2
+          done
+          test "$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json headRefOid --jq .headRefOid)" = "$HEAD_SHA"
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body '@coderabbitai review
+
+RC.4 recovery gate: review the final clean source head. Focus on TTY routing, automation compatibility, exact confirmations, argument boundaries, EOF, Cobra re-entry, and packaged docs.'
+
+          covered=""
+          for _ in $(seq 1 120); do
+            reviews="$(gh api --paginate "repos/$REPOSITORY/pulls/$PR_NUMBER/reviews")"
+            current="$(printf '%s' "$reviews" | jq -s --arg head "$HEAD_SHA" '[.[][] | select(.user.login == "coderabbitai[bot]" and .commit_id == $head)] | length')"
+            if [ "$current" -gt 0 ]; then covered="$HEAD_SHA"; break; fi
+            latest="$(printf '%s' "$reviews" | jq -rs '[.[][] | select(.user.login == "coderabbitai[bot]")] | sort_by(.submitted_at) | last | .commit_id // empty')"
+            if [ -n "$latest" ] && git cat-file -e "$latest^{commit}" 2>/dev/null && git merge-base --is-ancestor "$latest" "$HEAD_SHA"; then
+              remaining="$(git diff --name-only "$latest..$HEAD_SHA" | grep -Ev '^\.github/workflows/internal-[^/]+\.ya?ml$' || true)"
+              if [ -z "$remaining" ]; then covered="$latest"; break; fi
+            fi
+            sleep 10
+          done
+          test -n "$covered"
+          unresolved="$RUNNER_TEMP/unresolved.txt"
+          gh api graphql --paginate -f owner='MOVEI144' -f name='RunnerLoom' -F number="$PR_NUMBER" \
+            -f query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{isResolved comments(first:1){nodes{url}}}pageInfo{hasNextPage endCursor}}}}}' \
+            --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | .comments.nodes[0].url' > "$unresolved"
+          test ! -s "$unresolved"
+          gh pr merge "$PR_NUMBER" --repo "$REPOSITORY" --squash --subject 'feat(cli): add safe guided interactive mode (#14)' --body 'Add a TTY-only guided CLI while preserving explicit subcommands, JSON output, and non-interactive automation. Host-changing and destructive operations retain previews, exact confirmations, and existing fail-closed checks.'
+          echo "sha=$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json mergeCommit --jq .mergeCommit.oid)" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve merge commit
+        if: steps.state.outputs.release_exists != 'true'
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          merge_sha="$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json state,mergeCommit --jq 'select(.state == "MERGED") | .mergeCommit.oid')"
+          test -n "$merge_sha"
+          echo "sha=$merge_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Qualify merged main when release is missing
+        if: steps.state.outputs.release_exists != 'true'
+        id: qualification
+        shell: bash
+        env:
+          MERGE_SHA: ${{ steps.merge.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin main --tags
+          git checkout --detach origin/main
+          test "$(git rev-parse HEAD)" = "$MERGE_SHA"
+          test "$(cat VERSION)" = "0.1.0-rc.4"
+          test -z "$(find .github/workflows -maxdepth 1 -type f -name 'internal-*.yml' -print -quit)"
+          gh workflow run ci.yml --repo "$REPOSITORY" --ref main
+          run_id=""
+          for _ in $(seq 1 60); do
+            run_id="$(gh run list --repo "$REPOSITORY" --workflow ci.yml --branch main --event workflow_dispatch --limit 30 --json databaseId,headSha --jq ".[] | select(.headSha == \"$MERGE_SHA\") | .databaseId" | head -n1)"
+            [ -n "$run_id" ] && break
+            sleep 5
+          done
+          test -n "$run_id"
+          gh run watch "$run_id" --repo "$REPOSITORY" --exit-status
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish missing release
+        if: steps.state.outputs.release_exists != 'true'
+        shell: bash
+        env:
+          MERGE_SHA: ${{ steps.merge.outputs.sha }}
+          QUALIFICATION_RUN: ${{ steps.qualification.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          rm -rf dist vendor
+          python3 scripts/check-docs.py
+          go vet ./...
+          go test -race -count=1 ./...
+          go mod vendor
+          python3.12 scripts/package.py --deb
+          python3.12 scripts/test_package.py dist
+          mapfile -t archives < <(find dist -maxdepth 1 -type f -name 'runnerloom-*-linux-amd64.tar.gz' -print)
+          mapfile -t debs < <(find dist -maxdepth 1 -type f -name 'runnerloom_*_amd64.deb' -print)
+          mapfile -t infos < <(find dist -maxdepth 1 -type f -name 'runnerloom-*-buildinfo.json' -print)
+          test "${#archives[@]}" -eq 1
+          test "${#debs[@]}" -eq 1
+          test "${#infos[@]}" -eq 1
+          test -f dist/SHA256SUMS
+          jq -e --arg commit "$MERGE_SHA" '.sourceCommit == $commit' "${infos[0]}" >/dev/null
+          (cd dist && sha256sum --check SHA256SUMS)
+          git tag -a "$RELEASE_TAG" "$MERGE_SHA" -m 'RunnerLoom 0.1.0-rc.4'
+          git push origin "$RELEASE_TAG"
+          cat > "$RUNNER_TEMP/notes.md" <<EOF
+          ## RunnerLoom 0.1.0-rc.4
+
+          Adds a guided TTY interactive CLI while preserving explicit subcommands, stable JSON output, and non-interactive automation.
+
+          - Guided setup, diagnostics, Image/Cache, Network, Service, Node, VM, GitHub, Backup, and Maintenance.
+          - Dry-run previews and exact confirmation phrases before destructive or host-changing operations.
+          - No shell evaluation of user input; existing Cobra command safety checks remain authoritative.
+
+          Source: \`$MERGE_SHA\`
+          Pull request: https://github.com/$REPOSITORY/pull/$PR_NUMBER
+          Full qualification: https://github.com/$REPOSITORY/actions/runs/$QUALIFICATION_RUN
+          EOF
+          gh release create "$RELEASE_TAG" "${archives[0]}" "${debs[0]}" "${infos[0]}" dist/SHA256SUMS --repo "$REPOSITORY" --verify-tag --target "$MERGE_SHA" --title 'RunnerLoom 0.1.0-rc.4' --notes-file "$RUNNER_TEMP/notes.md" --prerelease
+
+      - name: Independently verify published release
+        shell: bash
+        run: |
+          set -euo pipefail
+          merge_sha="$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json state,mergeCommit --jq 'select(.state == "MERGED") | .mergeCommit.oid')"
+          test -n "$merge_sha"
+          release_url="$(gh release view "$RELEASE_TAG" --repo "$REPOSITORY" --json url --jq .url)"
+          test -n "$release_url"
+          git fetch origin "$RELEASE_TAG"
+          test "$(git rev-list -n1 "$RELEASE_TAG")" = "$merge_sha"
+          verify="$RUNNER_TEMP/release"
+          mkdir -p "$verify"
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" --dir "$verify"
+          (cd "$verify" && sha256sum --check SHA256SUMS)
+          archive="$(find "$verify" -maxdepth 1 -type f -name 'runnerloom-*-linux-amd64.tar.gz' -print -quit)"
+          test -n "$archive"
+          mkdir -p "$verify/extracted"
+          tar -xzf "$archive" -C "$verify/extracted"
+          binary="$(find "$verify/extracted" -path '*/runnerloom' -type f -print -quit)"
+          guide="$(find "$verify/extracted" -path '*/docs/INTERACTIVE_CLI.ja.md' -type f -print -quit)"
+          test -n "$binary"
+          test -n "$guide"
+          "$binary" version --json | jq -e '.version == "0.1.0-rc.4" or .data.version == "0.1.0-rc.4"' >/dev/null
+          "$binary" --json --help | grep -q 'runnerloom interactive'
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body "RC.4 recovery verification passed: release assets were downloaded again, SHA256SUMS passed, the packaged binary reports 0.1.0-rc.4, and the interactive guide/command are present: $release_url"
+
+      - name: Clean temporary workflows from surviving feature branch
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin feat/interactive-cli-rc4 || exit 0
+          git checkout -B feat/interactive-cli-rc4 origin/feat/interactive-cli-rc4
+          find .github/workflows -maxdepth 1 -type f -name 'internal-*.yml' -delete
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m 'chore: remove temporary RC4 workflows'
+            git push origin HEAD:feat/interactive-cli-rc4
+          fi
