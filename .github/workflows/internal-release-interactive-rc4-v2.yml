@@ -1,0 +1,375 @@
+name: Internal release interactive CLI rc4 v2
+
+on:
+  push:
+    branches: [feat/interactive-cli-rc4]
+    paths:
+      - .github/workflows/internal-release-interactive-rc4-v2.yml
+
+permissions:
+  actions: write
+  checks: read
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: runnerloom-interactive-rc4-release
+  cancel-in-progress: false
+
+jobs:
+  qualify-merge-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Cancel the superseded release gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          BRANCH: feat/interactive-cli-rc4
+        run: |
+          set -euo pipefail
+          gh run list --repo "$REPO" --branch "$BRANCH" --limit 100 --json databaseId,name,status \
+            | jq -r '.[] | select(.name == "Internal release interactive CLI rc4" and (.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "waiting")) | .databaseId' \
+            | while read -r run_id; do
+                test -n "$run_id" && gh run cancel "$run_id" --repo "$REPO" || true
+              done
+      - name: Wait for all earlier branch writers and checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          BRANCH: feat/interactive-cli-rc4
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 240); do
+            active="$({ gh run list --repo "$REPO" --branch "$BRANCH" --limit 100 --json databaseId,status,name || echo '[]'; } \
+              | jq --argjson self "$GITHUB_RUN_ID" '[.[] | select(.databaseId != $self and .name != "Internal release interactive CLI rc4" and (.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "requested" or .status == "waiting"))] | length')"
+            if test "$active" -eq 0; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo 'Branch writers/checks did not become idle' >&2
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: feat/interactive-cli-rc4
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Normalize and clean the exact candidate tree
+        env:
+          BRANCH: feat/interactive-cli-rc4
+        run: |
+          set -euo pipefail
+          git fetch origin "$BRANCH"
+          git reset --hard "origin/$BRANCH"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          root = Path('.')
+          cli = root / 'internal/cli/cli.go'
+          interactive = root / 'internal/cli/interactive.go'
+          tests = root / 'internal/cli/interactive_test.go'
+          script = root / 'scripts/apply-interactive-rc4.py'
+
+          if script.is_file() and 'a.addInteractive(root)' not in cli.read_text(encoding='utf-8'):
+              scope = {'__name__': '__main__', '__file__': str(script)}
+              exec(compile(script.read_text(encoding='utf-8'), str(script), 'exec'), scope)
+
+          required = [
+              interactive,
+              tests,
+              root / 'internal/cli/interactive_path_test.go',
+              root / 'internal/cli/interactive_security_gate_test.go',
+              root / 'docs/INTERACTIVE_CLI.ja.md',
+          ]
+          for path in required:
+              if not path.is_file():
+                  raise SystemExit(f'missing interactive implementation: {path}')
+
+          text = cli.read_text(encoding='utf-8')
+          old = '\troot.RunE = func(c *cobra.Command, _ []string) error { return c.Help() }\n'
+          new = ('\ta.addInteractive(root)\n'
+                 '\troot.RunE = func(c *cobra.Command, _ []string) error {\n'
+                 '\t\tif a.shouldStartInteractive() {\n'
+                 '\t\t\treturn a.runInteractive(c.Context())\n'
+                 '\t\t}\n'
+                 '\t\treturn c.Help()\n'
+                 '\t}\n')
+          if 'a.addInteractive(root)' not in text:
+              if old not in text:
+                  raise SystemExit('root integration marker missing')
+              cli.write_text(text.replace(old, new, 1), encoding='utf-8')
+
+          text = interactive.read_text(encoding='utf-8')
+          old_dispatch = ('\tif !containsStateFlag(args) {\n'
+                          '\t\tfull = append(full, "--state", a.State)\n'
+                          '\t}\n'
+                          '\tfull = append(full, args...)\n')
+          new_dispatch = ('\tif !containsStateFlag(args) {\n'
+                          '\t\tfull = append(full, "--state", a.State)\n'
+                          '\t}\n'
+                          '\tif !allowPrompts {\n'
+                          '\t\tfull = append(full, "--non-interactive")\n'
+                          '\t}\n'
+                          '\tfull = append(full, args...)\n')
+          if old_dispatch in text:
+              text = text.replace(old_dispatch, new_dispatch, 1)
+          if new_dispatch not in text:
+              raise SystemExit('nested menu dispatch is not explicitly non-interactive')
+
+          text = text.replace(
+              'fmt.Fprintf(a.Err, "%s: ", label)',
+              'fmt.Fprintf(a.Err, "%s: ", interactiveSafe(label))',
+          )
+          text = text.replace(
+              'fmt.Fprintf(a.Err, "%s [%s]: ", label, interactiveSafe(fallback))',
+              'fmt.Fprintf(a.Err, "%s [%s]: ", interactiveSafe(label), interactiveSafe(fallback))',
+          )
+          text = text.replace(
+              'fmt.Fprintf(a.Err, "\\n%s\\n", title)',
+              'fmt.Fprintf(a.Err, "\\n%s\\n", interactiveSafe(title))',
+          )
+          text = text.replace(
+              'fmt.Fprintf(a.Err, "  %s. %s\\n", item.Key, item.Label)',
+              'fmt.Fprintf(a.Err, "  %s. %s\\n", interactiveSafe(item.Key), interactiveSafe(item.Label))',
+          )
+          text = text.replace(
+              'fmt.Fprintf(a.Err, "\\n%s\\n", summary)',
+              'fmt.Fprintf(a.Err, "\\n%s\\n", interactiveSafe(summary))',
+          )
+
+          duration_marker = 'func (a *App) interactiveDuration(label string, fallback time.Duration, minimum, maximum time.Duration) (time.Duration, error) {\n'
+          id_helper = '''func (a *App) interactiveID(label string) (string, error) {\n\tfor {\n\t\tvalue, err := a.interactiveRequired(label, "")\n\t\tif err != nil {\n\t\t\treturn "", err\n\t\t}\n\t\tif core.ValidID(value) {\n\t\t\treturn value, nil\n\t\t}\n\t\t_, _ = fmt.Fprintln(a.Err, "32桁の小文字16進数IDを入力してください。")\n\t}\n}\n\n'''
+          if 'func (a *App) interactiveID(' not in text:
+              if duration_marker not in text:
+                  raise SystemExit('interactive ID insertion marker missing')
+              text = text.replace(duration_marker, id_helper + duration_marker, 1)
+          text = text.replace(
+              'id, promptErr := a.interactiveRequired("承認する申請ID", "")',
+              'id, promptErr := a.interactiveID("承認する申請ID")',
+              1,
+          )
+          for marker in (
+              'interactiveSafe(label)',
+              'interactiveSafe(summary)',
+              'func (a *App) interactiveID(',
+              'a.interactiveID("承認する申請ID")',
+          ):
+              if marker not in text:
+                  raise SystemExit(f'missing input hardening: {marker}')
+          interactive.write_text(text, encoding='utf-8')
+
+          text = tests.read_text(encoding='utf-8')
+          if '"errors"' not in text:
+              text = text.replace('\t"context"\n', '\t"context"\n\t"errors"\n', 1)
+          text = text.replace('if err == nil || err.Error() != "boom" {', 'if !errors.Is(err, io.ErrUnexpectedEOF) {', 1)
+          if '!errors.Is(err, io.ErrUnexpectedEOF)' not in text:
+              raise SystemExit('reader error assertion is not correct')
+          tests.write_text(text, encoding='utf-8')
+
+          (root / 'VERSION').write_text('0.1.0-rc.4\n', encoding='utf-8')
+
+          temporary = [
+              '.github/workflows/internal-source-export.yml',
+              '.github/workflows/internal-apply-interactive-rc4.yml',
+              '.github/workflows/internal-finalize-interactive-rc4.yml',
+              '.github/workflows/internal-fix-interactive-dispatch.yml',
+              '.github/workflows/internal-finalize-interactive-rc4-v2.yml',
+              '.github/workflows/internal-harden-interactive-input.yml',
+              '.github/workflows/internal-release-interactive-rc4.yml',
+              '.github/workflows/internal-release-interactive-rc4-v2.yml',
+              'scripts/apply-interactive-rc4.py',
+          ]
+          for name in temporary:
+              (root / name).unlink(missing_ok=True)
+          PY
+          gofmt -w internal/cli/cli.go internal/cli/interactive*.go
+          go mod tidy
+      - name: Review, test and package the clean candidate
+        run: |
+          set -euo pipefail
+          python3 scripts/check-docs.py
+          git diff --check
+          grep -F 'a.addInteractive(root)' internal/cli/cli.go
+          grep -F 'full = append(full, "--non-interactive")' internal/cli/interactive.go
+          grep -F 'interactiveSafe(summary)' internal/cli/interactive.go
+          grep -F 'func (a *App) interactiveID(' internal/cli/interactive.go
+          grep -Fx '0.1.0-rc.4' VERSION
+          ! find .github/workflows scripts -type f \( -name 'internal-*interactive*' -o -name 'apply-interactive-rc4.py' \) -print -quit | grep .
+          go vet ./...
+          go test -race -count=1 ./...
+          go mod vendor
+          python3 scripts/package.py --deb
+          python3 scripts/test_package.py dist
+          (cd dist && sha256sum --check SHA256SUMS)
+          git diff --exit-code -- go.mod go.sum
+      - name: Verify the packaged CLI across TTY boundaries
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/interactive-package"
+          mkdir -p "$stage"
+          tar -xzf dist/runnerloom-0.1.0-rc.4-linux-amd64.tar.gz -C "$stage"
+          binary="$(find "$stage" -type f -name runnerloom -perm -111 -print -quit)"
+          test -n "$binary"
+          printf '0\n' | script -qefc "$binary" "$RUNNER_TEMP/interactive-tty.log"
+          grep -F 'RunnerLoom 0.1.0-rc.4 対話モード' "$RUNNER_TEMP/interactive-tty.log"
+          printf '0\n' | "$binary" > "$RUNNER_TEMP/non-tty.out" 2> "$RUNNER_TEMP/non-tty.err"
+          ! grep -F 'メインメニュー' "$RUNNER_TEMP/non-tty.out" "$RUNNER_TEMP/non-tty.err"
+          grep -F 'Usage:' "$RUNNER_TEMP/non-tty.out" "$RUNNER_TEMP/non-tty.err"
+          "$binary" --json > "$RUNNER_TEMP/help.json"
+          jq -e '.ok == true and (.data.commands | length > 0)' "$RUNNER_TEMP/help.json"
+      - name: Push the final clean candidate
+        id: candidate
+        env:
+          BRANCH: feat/interactive-cli-rc4
+        run: |
+          set -euo pipefail
+          rm -rf vendor dist
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          if test -n "$(git status --porcelain)"; then
+            git commit -m 'feat(cli): finalize interactive operator mode for rc.4'
+            git push origin "HEAD:$BRANCH"
+          fi
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Dispatch full CI for the exact candidate
+        id: candidate_ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          BRANCH: feat/interactive-cli-rc4
+          HEAD_SHA: ${{ steps.candidate.outputs.sha }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --repo "$REPO" --ref "$BRANCH"
+          run_id=""
+          for _ in $(seq 1 60); do
+            runs="$(gh run list --repo "$REPO" --workflow ci.yml --branch "$BRANCH" --event workflow_dispatch --limit 50 --json databaseId,headSha,createdAt)"
+            run_id="$(printf '%s' "$runs" | jq -r --arg sha "$HEAD_SHA" 'map(select(.headSha == $sha)) | sort_by(.createdAt) | last | .databaseId // empty')"
+            test -n "$run_id" && break
+            sleep 5
+          done
+          test -n "$run_id"
+          gh run watch "$run_id" --repo "$REPO" --exit-status
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "url=$(gh run view "$run_id" --repo "$REPO" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+      - name: Obtain a final CodeRabbit review with no open threads
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          HEAD_SHA: ${{ steps.candidate.outputs.sha }}
+          CI_URL: ${{ steps.candidate_ci.outputs.url }}
+        run: |
+          set -euo pipefail
+          printf '@coderabbitai review\n\nFinal candidate is `%s`. Review TTY gating, JSON/non-interactive compatibility, nested Cobra dispatch, confirmation boundaries, terminal sanitization, path handling, and secret exposure. Full CI: %s\n' "$HEAD_SHA" "$CI_URL" > "$RUNNER_TEMP/review-request.md"
+          gh pr comment 14 --repo "$REPO" --body-file "$RUNNER_TEMP/review-request.md"
+          reviewed=0
+          for _ in $(seq 1 120); do
+            reviewed="$(gh api --paginate "repos/$REPO/pulls/14/reviews" | jq -s --arg sha "$HEAD_SHA" '[add[] | select((.user.login == "coderabbitai[bot]" or .user.login == "coderabbitai") and .commit_id == $sha)] | length')"
+            test "$reviewed" -gt 0 && break
+            sleep 10
+          done
+          if test "$reviewed" -eq 0; then
+            echo 'CodeRabbit did not submit a review for the final candidate' >&2
+            exit 1
+          fi
+          unresolved="$(gh api graphql -f owner=MOVEI144 -f name=RunnerLoom -F number=14 -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}}}}' --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')"
+          if test "$unresolved" -ne 0; then
+            gh pr comment 14 --repo "$REPO" --body "Release gate stopped: CodeRabbit left $unresolved unresolved review thread(s). No merge or release was performed."
+            exit 1
+          fi
+      - name: Merge the reviewed candidate
+        id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+        run: |
+          set -euo pipefail
+          gh pr merge 14 --repo "$REPO" --merge --delete-branch=false
+          merge_sha="$(gh pr view 14 --repo "$REPO" --json mergedAt,mergeCommit --jq 'select(.mergedAt != null) | .mergeCommit.oid')"
+          test -n "$merge_sha"
+          echo "sha=$merge_sha" >> "$GITHUB_OUTPUT"
+      - name: Dispatch full CI for the exact main merge
+        id: main_ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          MERGE_SHA: ${{ steps.merge.outputs.sha }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --repo "$REPO" --ref main
+          run_id=""
+          for _ in $(seq 1 60); do
+            runs="$(gh run list --repo "$REPO" --workflow ci.yml --branch main --event workflow_dispatch --limit 50 --json databaseId,headSha,createdAt)"
+            run_id="$(printf '%s' "$runs" | jq -r --arg sha "$MERGE_SHA" 'map(select(.headSha == $sha)) | sort_by(.createdAt) | last | .databaseId // empty')"
+            test -n "$run_id" && break
+            sleep 5
+          done
+          test -n "$run_id"
+          gh run watch "$run_id" --repo "$REPO" --exit-status
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "url=$(gh run view "$run_id" --repo "$REPO" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+      - name: Build assets from the exact merge commit
+        env:
+          MERGE_SHA: ${{ steps.merge.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          git checkout --detach "$MERGE_SHA"
+          test "$(git rev-parse HEAD)" = "$MERGE_SHA"
+          grep -Fx '0.1.0-rc.4' VERSION
+          go mod vendor
+          rm -rf dist
+          python3 scripts/package.py --deb
+          python3 scripts/test_package.py dist
+          (cd dist && sha256sum --check SHA256SUMS)
+          jq -e --arg sha "$MERGE_SHA" '.sourceCommit == $sha' dist/runnerloom-0.1.0-rc.4-buildinfo.json
+      - name: Create and independently verify the release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+          TAG: v0.1.0-rc.4
+          MERGE_SHA: ${{ steps.merge.outputs.sha }}
+          QUALIFICATION_URL: ${{ steps.main_ci.outputs.url }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing ambiguous replacement" >&2
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          ## RunnerLoom 0.1.0-rc.4
+
+          Adds a guarded human-oriented interactive CLI while preserving the existing automation interface.
+
+          - Run \`runnerloom\` in a terminal or \`runnerloom interactive\` to open the menu.
+          - Covers setup, diagnostics, image cache, VM network, Node, Pool/GitHub, backup/maintenance and systemd service workflows.
+          - Non-TTY, explicit subcommands, \`--json\` and \`--non-interactive\` never wait for input.
+          - Host-changing operations require exact confirmation phrases; cache prune and database compact remain dry-run-first.
+          - Menu values are passed as argument arrays to existing fail-closed Cobra commands, never through a shell.
+          - Dynamic terminal text is sanitized, and enrollment IDs are format-validated before confirmation.
+
+          Source: \`$MERGE_SHA\`
+          Qualification: $QUALIFICATION_URL
+          EOF
+          gh release create "$TAG" dist/* --repo "$REPO" --target "$MERGE_SHA" --title 'RunnerLoom 0.1.0-rc.4' --notes-file "$RUNNER_TEMP/release-notes.md" --prerelease
+          verify="$RUNNER_TEMP/release-verify"
+          mkdir -p "$verify"
+          gh release download "$TAG" --repo "$REPO" --dir "$verify"
+          (cd "$verify" && sha256sum --check SHA256SUMS)
+          jq -e --arg sha "$MERGE_SHA" '.sourceCommit == $sha' "$verify/runnerloom-0.1.0-rc.4-buildinfo.json"
+          target="$(gh release view "$TAG" --repo "$REPO" --json targetCommitish --jq .targetCommitish)"
+          test "$target" = "$MERGE_SHA"
+          echo "url=$(gh release view "$TAG" --repo "$REPO" --json url --jq .url)" >> "$GITHUB_OUTPUT"
+      - name: Record release evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: MOVEI144/RunnerLoom
+        run: |
+          gh pr comment 14 --repo "$REPO" --body "Merged and released as [v0.1.0-rc.4](${{ steps.release.outputs.url }}). Merge commit: \`${{ steps.merge.outputs.sha }}\`. Main qualification: ${{ steps.main_ci.outputs.url }}. Published assets were downloaded again and verified against SHA256SUMS and buildinfo.sourceCommit."
