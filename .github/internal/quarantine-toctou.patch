@@ -1,0 +1,24 @@
+diff --git a/internal/host/cache.go b/internal/host/cache.go
+--- a/internal/host/cache.go
++++ b/internal/host/cache.go
+@@ -768,6 +768,19 @@ func (i *Images) quarantineDigestMismatch(path, digest string) (string, error) {
+ 	if actual == digest {
+ 		return "", errors.New("refusing to quarantine an image whose digest now matches")
+ 	}
++	after, err := regularInfo(path)
++	if err != nil {
++		return "", err
++	}
++	if !os.SameFile(info, after) || info.Size() != after.Size() || !info.ModTime().Equal(after.ModTime()) {
++		return "", errors.New("image changed while quarantine was being prepared")
++	}
++	if links := fileLinkCount(after); links > 1 {
++		return "", core.Fail(
++			"CACHE_IMAGE_SHARED_CORRUPTION",
++			"digest不一致のImageに検査中に別のhard linkが追加されました。所有serviceを停止し、参照を再確認してください",
++			map[string]any{"path": path, "linkCount": links},
++		)
++	}
+ 	temp, err := os.CreateTemp(i.Dir, ".quarantine-"+digest[7:]+"-")
+ 	if err != nil {
+ 		return "", err
