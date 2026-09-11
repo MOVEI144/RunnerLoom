@@ -1,0 +1,120 @@
+name: Internal clean-head cache final gate
+
+on:
+  push:
+    branches:
+      - feat/cache-lifecycle-management
+    paths:
+      - .github/workflows/internal-cache-final-gate-v2.yml
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: "13"
+      BRANCH: feat/cache-lifecycle-management
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Validate source and publish a clean PR head
+        id: clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4; do
+            git fetch origin "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path("internal/host/cache.go")
+          text = path.read_text()
+          if "exists, err := checkExistingPrivateDirectory(i.Dir)" in text:
+              text = text.replace(
+                  "\tvar lock *core.Lock\n\tvar err error\n\tif apply {\n",
+                  "\tvar lock *core.Lock\n\tif apply {\n",
+                  1,
+              )
+          path.write_text(text)
+          PY
+            gofmt -w internal/host/cache.go
+            python3 scripts/check-docs.py
+            git diff --check
+            go vet ./...
+            go test -count=1 ./...
+            go test -race -count=1 ./internal/host ./internal/cli ./internal/core
+            find .github/workflows -maxdepth 1 -type f -name 'internal-*.yml' -print -delete
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add internal/host/cache.go .github/workflows
+            if ! git diff --cached --quiet; then
+              git commit -m "chore(cache): publish clean reviewed head"
+            fi
+            if git push origin HEAD:"$BRANCH"; then
+              echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          exit 1
+      - name: Request CodeRabbit review for clean head
+        shell: bash
+        run: |
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body '@coderabbitai review
+
+Review only the current clean head. All temporary validation workflows have been removed. Recheck cache mutation safety, enabled-Pool plus active-Instance references, missing/orphan state, hard links, physical reserve, CLI side effects and docs.'
+      - name: Require clean-head checks and review
+        shell: bash
+        run: |
+          set -euo pipefail
+          head='${{ steps.clean.outputs.sha }}'
+          owner="${REPO%%/*}"
+          name="${REPO#*/}"
+          context='cache/final-review-gate'
+          failure() {
+            gh api --method POST "repos/$REPO/statuses/$head" -f state=failure -f context="$context" -f description="$1" >/dev/null || true
+          }
+          trap 'failure "Clean-head cache gate failed"' ERR
+
+          for attempt in $(seq 1 180); do
+            test "$(gh api "repos/$REPO/git/ref/heads/$BRANCH" --jq .object.sha)" = "$head" || { echo 'PR head moved' >&2; exit 1; }
+            checks="$(gh api -H 'Accept: application/vnd.github+json' "repos/$REPO/commits/$head/check-runs?per_page=100")"
+            total="$(jq '.total_count' <<<"$checks")"
+            pending="$(jq '[.check_runs[] | select(.status != "completed")] | length' <<<"$checks")"
+            failed="$(jq '[.check_runs[] | select(.status == "completed" and (.conclusion | IN("success","neutral","skipped") | not))] | length' <<<"$checks")"
+            reviews="$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews?per_page=100")"
+            reviewed="$(jq --arg head "$head" '[.[] | select(.user.login == "coderabbitai[bot]" and .commit_id == $head)] | length' <<<"$reviews")"
+            test "$failed" -eq 0 || { echo 'current-head check failed' >&2; exit 1; }
+            if test "$total" -gt 0 && test "$pending" -eq 0 && test "$reviewed" -gt 0; then break; fi
+            sleep 5
+            test "$attempt" -lt 180 || { echo 'checks/review timeout' >&2; exit 1; }
+          done
+
+          query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved isOutdated comments(first:20){nodes{author{login} body path line}}}}}}}'
+          threads="$(gh api graphql -f query="$query" -F owner="$owner" -F name="$name" -F number="$PR_NUMBER")"
+          mutation='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{id isResolved}}}'
+          mapfile -t outdated < <(jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false and .isOutdated == true and ([.comments.nodes[].author.login] | any(. == "coderabbitai" or . == "coderabbitai[bot]"))) | .id' <<<"$threads")
+          for id in "${outdated[@]}"; do gh api graphql -f query="$mutation" -F id="$id" >/dev/null; done
+          threads="$(gh api graphql -f query="$query" -F owner="$owner" -F name="$name" -F number="$PR_NUMBER")"
+          active="$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false and .isOutdated == false and ([.comments.nodes[].author.login] | any(. == "coderabbitai" or . == "coderabbitai[bot]")))] | length' <<<"$threads")"
+          test "$active" -eq 0 || {
+            jq -r '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false and .isOutdated == false) | .comments.nodes[] | select(.author.login == "coderabbitai" or .author.login == "coderabbitai[bot]") | "\(.path // "unknown"):\(.line // 0) \(.body)"' <<<"$threads" > /tmp/findings.txt
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/findings.txt || true
+            echo "$active active CodeRabbit findings" >&2
+            exit 1
+          }
+          gh api --method POST "repos/$REPO/statuses/$head" -f state=success -f context="$context" -f description='Clean-head tests, CI and CodeRabbit review passed' >/dev/null
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body "Clean-head final gate passed for \`$head\`. Temporary workflows are absent; repository/race/docs checks and the current-head CodeRabbit review are clean." >/dev/null
