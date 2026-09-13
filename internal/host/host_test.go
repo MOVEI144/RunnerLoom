@@ -21,6 +21,7 @@ type fakeHost struct {
 	Table         bool
 	Drift         bool
 	LiveVM        bool
+	DefinedVM     bool
 	Routes        string
 	Commands      []string
 	ForeignDomain string
@@ -36,6 +37,8 @@ func (f *fakeHost) Run(_ context.Context, name string, args []string, input []by
 		return []byte(`[]`), nil
 	case "qemu-img":
 		return []byte(`{"format":"qcow2","virtual-size":21474836480}`), nil
+	case "cloud-localds":
+		return nil, nil
 	case "nft":
 		if len(args) > 0 && args[0] == "--check" {
 			return nil, nil
@@ -60,11 +63,17 @@ func (f *fakeHost) Run(_ context.Context, name string, args []string, input []by
 		args = args[2:]
 		switch args[0] {
 		case "list":
+			all := false
+			for _, a := range args {
+				if a == "--all" {
+					all = true
+				}
+			}
 			if f.ForeignDomain != "" {
 				return []byte(f.ForeignDomain), nil
 			}
-			if f.LiveVM {
-				return []byte("rl-running-vm"), nil
+			if f.LiveVM || (all && f.DefinedVM) {
+				return []byte("rl-defined-vm"), nil
 			}
 			return []byte(""), nil
 		case "dumpxml":
@@ -169,6 +178,45 @@ func TestNetworkRefusesChangesDuringVMExecution(t *testing.T) {
 	f.LiveVM = true
 	if e := n.Apply(context.Background()); e == nil {
 		t.Fatal("network changed under live VMs")
+	}
+}
+func TestNetworkRefusesChangesForDefinedStoppedVMs(t *testing.T) {
+	n, f := networkFixture(t)
+	f.DefinedVM = true
+	if e := n.Apply(context.Background()); e == nil {
+		t.Fatal("network changed under defined VMs")
+	}
+}
+func TestRebuildCloudSeedReplacesExistingISO(t *testing.T) {
+	exec := &fakeHost{}
+	l := &Libvirt{Exec: exec}
+	dir := t.TempDir()
+	seed := filepath.Join(dir, "seed.iso")
+	if e := os.WriteFile(seed, []byte("stale"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	user := filepath.Join(dir, "user-data")
+	meta := filepath.Join(dir, "meta-data")
+	if e := os.WriteFile(user, []byte("#cloud-config\n"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.WriteFile(meta, []byte("instance-id: a\n"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e := l.rebuildCloudSeed(context.Background(), seed, user, meta); e != nil {
+		t.Fatal(e)
+	}
+	if e := l.rebuildCloudSeed(context.Background(), seed, user, meta); e != nil {
+		t.Fatal(e)
+	}
+	n := 0
+	for _, cmd := range exec.Commands {
+		if strings.HasPrefix(cmd, "cloud-localds ") {
+			n++
+		}
+	}
+	if n != 2 {
+		t.Fatalf("existing seed.iso skipped rebuild: %v", exec.Commands)
 	}
 }
 func TestNetworkRouteConflict(t *testing.T) {

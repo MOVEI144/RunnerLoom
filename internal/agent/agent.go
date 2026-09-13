@@ -29,6 +29,16 @@ import (
 	"github.com/MOVEI144/RunnerLoom/internal/host"
 )
 
+func acceptCommand(node string, ceiling core.Resources, cmd core.Command) error {
+	if cmd.Instance.Node != node {
+		return errors.New("controller command exceeds node policy")
+	}
+	if cmd.Action == "ensure" && !cmd.Instance.Pool.Charge().Fits(ceiling) {
+		return errors.New("controller command exceeds node policy")
+	}
+	return nil
+}
+
 type Config struct {
 	Node        string         `json:"node"`
 	Cluster     string         `json:"cluster"`
@@ -425,8 +435,8 @@ func (a *Agent) Step(ctx context.Context) error {
 		a.catalog = reply.Images
 	}
 	for _, cmd := range reply.Commands {
-		if cmd.Instance.Node != a.Config.Node || !cmd.Instance.Pool.Charge().Fits(a.Config.Ceiling) {
-			return errors.New("controller command exceeds node policy")
+		if e = acceptCommand(a.Config.Node, a.Config.Ceiling, cmd); e != nil {
+			return e
 		}
 		switch cmd.Action {
 		case "ensure":

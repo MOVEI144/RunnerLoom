@@ -469,6 +469,11 @@ func (a *App) Command() *cobra.Command {
 				}
 				return a.output(p)
 			case "apply":
+				lock, e := core.AcquireLock(conf.StateDir, "agent")
+				if e != nil {
+					return e
+				}
+				defer lock.Close()
 				if e = n.Apply(c.Context()); e != nil {
 					return e
 				}

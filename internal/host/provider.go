@@ -627,11 +627,7 @@ func (l *Libvirt) ensure(ctx context.Context, a core.Instance, jit string, diagn
 		return e
 	}
 	seed := filepath.Join(dir, "seed.iso")
-	if _, e = os.Lstat(seed); os.IsNotExist(e) {
-		if _, e = l.Exec.Run(ctx, "cloud-localds", []string{seed, filepath.Join(private, "user-data"), filepath.Join(private, "meta-data")}, nil); e != nil {
-			return e
-		}
-	} else if e != nil {
+	if e = l.rebuildCloudSeed(ctx, seed, filepath.Join(private, "user-data"), filepath.Join(private, "meta-data")); e != nil {
 		return e
 	}
 	if e = l.makeReadable(seed); e != nil {
@@ -811,6 +807,14 @@ func removeKnown(dir string, files []string) error {
 	}
 	return nil
 }
+func (l *Libvirt) rebuildCloudSeed(ctx context.Context, seed, userData, metaData string) error {
+	if e := os.Remove(seed); e != nil && !os.IsNotExist(e) {
+		return e
+	}
+	_, e := l.Exec.Run(ctx, "cloud-localds", []string{seed, userData, metaData}, nil)
+	return e
+}
+
 func FreeGiB(path string) (int64, error) {
 	var st syscall.Statfs_t
 	if e := syscall.Statfs(path, &st); e != nil {
