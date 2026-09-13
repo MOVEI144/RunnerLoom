@@ -431,9 +431,39 @@ func (s *Store) Approve(ctx context.Context, id string, ca CA) (out Enrollment, 
 	return
 }
 func (s *Store) Authorize(ctx context.Context, name string) error {
+	return s.authorize(ctx, name, "")
+}
+
+func (s *Store) AuthorizePeer(ctx context.Context, name string, certPEM []byte) error {
+	return s.authorize(ctx, name, Hash(certPEM))
+}
+
+func (s *Store) authorize(ctx context.Context, name, wantHash string) error {
 	var revoked bool
-	e := s.DB.QueryRowContext(ctx, "SELECT revoked FROM identities WHERE name=?", name).Scan(&revoked)
+	var hash string
+	e := s.DB.QueryRowContext(ctx, "SELECT revoked,certificate_hash FROM identities WHERE name=?", name).Scan(&revoked, &hash)
 	if e != nil || revoked {
+		return Fail("NODE_UNAUTHORIZED", "Nodeは未承認または失効済みです", nil)
+	}
+	if wantHash != "" && hash != "" && hash != wantHash {
+		return Fail("NODE_UNAUTHORIZED", "Nodeは未承認または失効済みです", nil)
+	}
+	return nil
+}
+
+func (s *Store) UpdateIdentityCertificate(ctx context.Context, name string, certPEM []byte) error {
+	if !ValidName(name) || len(certPEM) == 0 {
+		return Fail("NODE_UNAUTHORIZED", "Nodeは未承認または失効済みです", nil)
+	}
+	r, e := s.DB.ExecContext(ctx, "UPDATE identities SET certificate_hash=? WHERE name=? AND revoked=0", Hash(certPEM), name)
+	if e != nil {
+		return e
+	}
+	n, e := r.RowsAffected()
+	if e != nil {
+		return e
+	}
+	if n == 0 {
 		return Fail("NODE_UNAUTHORIZED", "Nodeは未承認または失効済みです", nil)
 	}
 	return nil

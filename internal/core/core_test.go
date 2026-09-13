@@ -192,6 +192,38 @@ func TestOfflineAndMissingImageAreNotCapacity(t *testing.T) {
 		})
 	}
 }
+func TestUnknownDoesNotRequestEnsure(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	v := allocate(t, s, "linux-lite")
+	if e := s.SetJIT(ctx, v.ID, 1, "FAKE_TEST_JIT"); e != nil {
+		t.Fatal(e)
+	}
+	reply := observe(t, s, c, 2, VMReport{ID: v.ID, State: "Unknown"})
+	for _, cmd := range reply.Commands {
+		if cmd.Action == "ensure" {
+			t.Fatal("unknown host report requested ensure")
+		}
+	}
+}
+
+func TestSyncPrefersDeleteOverEnsure(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	lite := allocate(t, s, "linux-lite")
+	heavy := allocate(t, s, "linux-heavy")
+	if e := s.SetJIT(ctx, lite.ID, 1, "FAKE_TEST_JIT"); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.SetJIT(ctx, heavy.ID, 2, "FAKE_TEST_JIT"); e != nil {
+		t.Fatal(e)
+	}
+	reply := observe(t, s, c, 2, VMReport{ID: lite.ID, State: "Stopped"})
+	if len(reply.Commands) == 0 || reply.Commands[0].Action != "delete" {
+		t.Fatalf("delete was not first: %+v", reply.Commands)
+	}
+}
+
 func TestUnknownHoldsResources(t *testing.T) {
 	s, c := testStore(t)
 	observe(t, s, c, 1)
@@ -366,6 +398,21 @@ func TestMessageDedupeAndDemandBarrier(t *testing.T) {
 		t.Fatal("fresh statistics did not clear barrier")
 	}
 }
+func TestReadSecretRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "secret")
+	if e := os.WriteFile(real, []byte("payload"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	link := filepath.Join(dir, "link")
+	if e := os.Symlink(real, link); e != nil {
+		t.Fatal(e)
+	}
+	if _, e := ReadSecret(link); e == nil {
+		t.Fatal("symlink secret accepted")
+	}
+}
+
 func TestBackupPreservesAllocations(t *testing.T) {
 	s, c := testStore(t)
 	observe(t, s, c, 1)

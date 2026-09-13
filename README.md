@@ -4,7 +4,7 @@ Run each GitHub Actions job in a fresh VM on your own Ubuntu machines.
 
 A single Go binary (CLI, Controller, and Agent) polls GitHub’s official scale-set API over **outbound HTTPS**. There is no inbound webhook. Each job gets a new libvirt VM and a one-job JIT runner; the host confirms stop and ownership before disks are deleted.
 
-**Release:** `0.1.0-rc.3` (candidate). **Host:** Ubuntu 24.04 x86_64, CPU VMs, trusted admin. **Jobs:** only GitHub repositories you list that are **private**. GPU, Windows/macOS hosts, controller HA, and public-repo / public-fork jobs are not qualified in this release (hosts other than Ubuntu may be added later).
+**Release:** `0.1.0-rc.4` (candidate). **Host:** Ubuntu 24.04 x86_64, CPU VMs, trusted admin. **Jobs:** only GitHub repositories you list that are **private**. GPU, Windows/macOS hosts, controller HA, and public-repo / public-fork jobs are not qualified in this release (hosts other than Ubuntu may be added later).
 
 [Releases](https://github.com/MOVEI144/RunnerLoom/releases) · [Docs index](docs/README.md) · [Security](SECURITY.md) · [Verification](docs/VERIFICATION.md)
 

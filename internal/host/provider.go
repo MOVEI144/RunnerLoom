@@ -549,7 +549,7 @@ func (l *Libvirt) ensure(ctx context.Context, a core.Instance, jit string, diagn
 	if e != nil {
 		return e
 	}
-	if free < a.Pool.Charge().Disk+2 {
+	if free < used.Disk+a.Pool.Charge().Disk+2 {
 		return errors.New("physical VM storage lacks the requested capacity and safety margin")
 	}
 	m = manifest{Instance: a, Phase: "prepared", JITHash: core.Hash([]byte(jit)), Diagnostic: diagnostic}

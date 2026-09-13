@@ -163,14 +163,21 @@ func (a *auth) CheckAccess(ctx context.Context, c core.Config) error {
 			return core.Fail("PUBLIC_REPOSITORY_DISABLED", "初期版は明示した非公開Repositoryのみ利用できます", repo)
 		}
 	}
-	if len(scope) == 2 {
-		return nil
+	if e := a.checkRunnerGroup(ctx, c, scope[0]); e != nil {
+		if len(scope) == 2 && strings.Contains(e.Error(), "HTTP 404") {
+			return nil
+		}
+		return e
 	}
+	return nil
+}
+
+func (a *auth) checkRunnerGroup(ctx context.Context, c core.Config, owner string) error {
 	var group struct {
 		Visibility   string `json:"visibility"`
 		AllowsPublic bool   `json:"allows_public_repositories"`
 	}
-	path := fmt.Sprintf("/orgs/%s/actions/runner-groups/%d", url.PathEscape(scope[0]), c.GitHub.RunnerGroupID)
+	path := fmt.Sprintf("/orgs/%s/actions/runner-groups/%d", url.PathEscape(owner), c.GitHub.RunnerGroupID)
 	if e := a.get(ctx, path, &group); e != nil {
 		return e
 	}

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.0-rc.4
+
+Fourth Linux/amd64 CPU/LAN release candidate, focused on fail-closed job intake and host lifecycle.
+
+- Keep `stop`/`delete` working after a node ceiling shrink; only `ensure` is gated on the current ceiling.
+- Retry scale-set acquire/ACK on the same session; fence demand until every job request ID is acquired; do not ACK a partial acquire.
+- Remove leaked GitHub JIT runners when the returned name does not match or persistence fails.
+- Rebuild `seed.iso` on `prepared` retries so guest timeouts follow the current deadline.
+- Serialize `network apply` with the agent lock and refuse defined, not only running, RunnerLoom domains.
+- Enforce Runner Group selected/private policy for organization owners even when `github.url` is a single repository; skip the group API only on HTTP 404 (personal accounts).
+- Serve Golden Images for disabled pools only to nodes that still have a non-deleted instance on that digest.
+- Prefer delete/stop commands over `ensure`, and do not `ensure` a VM reported `Unknown`.
+- Open secrets with `O_NOFOLLOW`, re-check private directories after `MkdirAll`, and create invitation files exclusively.
+- Pin peer certificates in `Authorize` and refresh the stored hash on renew.
+- Require free VM storage to cover outstanding disk commitments plus the incoming VM and the 2 GiB safety margin.
+
 ## 0.1.0-rc.3
 
 Third Linux/amd64 CPU/LAN release candidate, focused on bounded Image cache lifecycle and clearer operations.

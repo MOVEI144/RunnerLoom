@@ -45,28 +45,41 @@ func PrivateDir(path string) error {
 	if e := os.MkdirAll(path, 0700); e != nil {
 		return e
 	}
-	st, e := os.Stat(path)
+	for p := path; ; p = filepath.Dir(p) {
+		st, e := os.Lstat(p)
+		if e != nil {
+			return e
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			return errors.New("symlink in private path")
+		}
+		if p == filepath.Dir(p) {
+			break
+		}
+	}
+	st, e := os.Lstat(path)
 	if e != nil {
 		return e
 	}
-	if !st.IsDir() || st.Mode().Perm()&0077 != 0 {
+	if !st.IsDir() || st.Mode()&os.ModeSymlink != 0 || st.Mode().Perm()&0077 != 0 {
 		return errors.New("private directory must have mode 0700")
 	}
 	return nil
 }
 func ReadSecret(path string) ([]byte, error) {
-	st, e := os.Lstat(path)
+	fd, e := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
 	if e != nil {
 		return nil, e
 	}
-	if !st.Mode().IsRegular() || st.Mode().Perm()&0077 != 0 || st.Size() > MaxJSON {
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	st, e := f.Stat()
+	if e != nil {
+		return nil, e
+	}
+	if !st.Mode().IsRegular() || st.Mode()&os.ModeSymlink != 0 || st.Mode().Perm()&0077 != 0 || st.Size() > MaxJSON {
 		return nil, errors.New("secret must be a regular owner-only file smaller than 1MiB")
 	}
-	f, e := os.Open(path)
-	if e != nil {
-		return nil, e
-	}
-	defer f.Close()
 	var b strings.Builder
 	_, e = ioCopyBounded(&b, f, MaxJSON)
 	return []byte(b.String()), e
@@ -734,6 +747,7 @@ func (s *Store) Sync(ctx context.Context, name string, o Observation) (response 
 		if e != nil {
 			return e
 		}
+		pending := []pendingCommand{}
 		for _, a := range runs {
 			if a.Node != name || a.State == "Deleted" {
 				continue
@@ -774,7 +788,6 @@ func (s *Store) Sync(ctx context.Context, name string, o Observation) (response 
 				return e
 			}
 			action := ""
-			jit := ""
 			switch {
 			case a.State == "Deleted":
 				continue
@@ -783,27 +796,58 @@ func (s *Store) Sync(ctx context.Context, name string, o Observation) (response 
 			case a.State == "Stopping" || !s.Now().Before(a.Deadline):
 				action = "stop"
 			case a.JITReady:
-				if r, ok := reports[a.ID]; ok && r.State == "Running" {
+				if r, ok := reports[a.ID]; ok && (r.State == "Running" || r.State == "Unknown") {
 					continue
 				}
 				action = "ensure"
+			}
+			if action != "" {
+				pending = append(pending, pendingCommand{Instance: a, Action: action})
+			}
+		}
+		sort.SliceStable(pending, func(i, j int) bool {
+			rank := func(action string) int {
+				switch action {
+				case "delete":
+					return 0
+				case "stop":
+					return 1
+				default:
+					return 2
+				}
+			}
+			if ri, rj := rank(pending[i].Action), rank(pending[j].Action); ri != rj {
+				return ri < rj
+			}
+			return pending[i].Instance.ID < pending[j].Instance.ID
+		})
+		for _, item := range pending {
+			if len(response.Commands) >= 4 {
+				break
+			}
+			jit := ""
+			if item.Action == "ensure" {
 				var encrypted []byte
-				if e = tx.QueryRowContext(ctx, "SELECT jit FROM instances WHERE id=?", a.ID).Scan(&encrypted); e != nil {
+				if e = tx.QueryRowContext(ctx, "SELECT jit FROM instances WHERE id=?", item.Instance.ID).Scan(&encrypted); e != nil {
 					return e
 				}
-				jit, e = s.decrypt(a.ID, encrypted)
+				jit, e = s.decrypt(item.Instance.ID, encrypted)
 				if e != nil {
 					return e
 				}
 			}
-			if action != "" && len(response.Commands) < 4 {
-				response.Commands = append(response.Commands, Command{Instance: a, Action: action, JIT: jit})
-			}
+			response.Commands = append(response.Commands, Command{Instance: item.Instance, Action: item.Action, JIT: jit})
 		}
 		return nil
 	})
 	return
 }
+
+type pendingCommand struct {
+	Instance Instance
+	Action   string
+}
+
 func (s *Store) Drain(ctx context.Context, name string, drained bool) error {
 	r, e := s.DB.ExecContext(ctx, "UPDATE nodes SET drained=? WHERE name=?", drained, name)
 	if e != nil {
