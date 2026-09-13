@@ -1,59 +1,34 @@
 # RunnerLoom
 
-自宅・社内の **Ubuntuマシン** を、GitHub Actions向けの使い捨てVM Runner群として使うための基盤です。Jobごとに新しいVMを作成し、終了後はホスト側で停止・削除を確認してから資源を解放します。
+Run each GitHub Actions job in a fresh VM on your own Ubuntu machines.
 
-> Run each GitHub Actions job in a fresh VM on your own Ubuntu machines.
+A single Go binary (CLI, Controller, and Agent) polls GitHub’s official scale-set API over **outbound HTTPS**. There is no inbound webhook. Each job gets a new libvirt VM and a one-job JIT runner; the host confirms stop and ownership before disks are deleted.
 
-[Releases](https://github.com/MOVEI144/RunnerLoom/releases) · [ドキュメント一覧](docs/README.md) · [1台構成セットアップ](docs/QUICKSTART.ja.md) · [Security](SECURITY.md) · [検証済み範囲](docs/VERIFICATION.md)
+**Release:** `0.1.0-rc.3` (candidate). **Host:** Ubuntu 24.04 x86_64, CPU VMs, trusted admin. **Jobs:** only GitHub repositories you list that are **private**. GPU, Windows/macOS hosts, controller HA, and public-repo / public-fork jobs are not qualified in this release (hosts other than Ubuntu may be added later).
 
-> [!IMPORTANT]
-> 現在はリリース候補です。対象は **Ubuntu 24.04 x86_64 / CPU VM / 信頼できる管理者 / 明示的に許可した非公開Repository** です。GPU passthrough、Windows/macOSホスト、Controller HA、公開fork由来のJobは対象外です。
+[Releases](https://github.com/MOVEI144/RunnerLoom/releases) · [Docs index](docs/README.md) · [Security](SECURITY.md) · [Verification](docs/VERIFICATION.md)
 
-## 迷ったらここから
+---
 
-| やりたいこと | 読むページ |
-|---|---|
-| まず何をするソフトか知りたい | このREADMEの「仕組み」 |
-| CLIをインストール・更新・削除したい | [INSTALL.md](docs/INSTALL.md) |
-| 1台のPCで最初のJobを動かしたい | [QUICKSTART.ja.md](docs/QUICKSTART.ja.md) |
-| セットアップ中のエラーを解決したい | [TROUBLESHOOTING.ja.md](docs/TROUBLESHOOTING.ja.md) |
-| 2台目以降のNodeを追加したい | [MULTI_NODE.ja.md](docs/MULTI_NODE.ja.md) |
-| drain、停止、バックアップ、更新をしたい | [OPERATIONS.ja.md](docs/OPERATIONS.ja.md) |
-| Image cacheの容量確認・整理をしたい | [CACHE.ja.md](docs/CACHE.ja.md) |
-| 設計・安全性・検証境界を確認したい | [ARCHITECTURE.md](docs/ARCHITECTURE.md) / [SECURITY.md](SECURITY.md) / [VERIFICATION.md](docs/VERIFICATION.md) |
+## これは何か
 
-## 仕組み
+自宅や社内の Ubuntu を、GitHub Actions の **Job 専用の使い捨て VM** にするソフトです。
 
 ```text
-GitHub Actions
-      │  outbound HTTPS
+Workflow  (runs-on: Poolの名前)
+      │
+      │  GitHub が Scale Set に「何台欲しいか」を載せる
       ▼
- Controller ── 配置判断・状態・GitHub連携・SQLite
+ Controller  ←── 外向き HTTPS（webhook は受け取らない）
       ▲
-      │  Nodeからのoutbound mTLS
- ┌────┴────────────┐
- ▼                 ▼
-Node A            Node B
-libvirt/KVM       libvirt/KVM
-新規VM → Job → 削除  新規VM → Job → 削除
+      │  Node からの外向き mTLS
+      ▼
+ Node (libvirt/KVM)  新規VM → 1 Job → ホストが停止・削除を確認
 ```
 
-1. ControllerがGitHubから必要なRunner数を受け取ります。
-2. CPU・RAM・ディスク、Pool、予約枠、イメージ、Node状態を照合して配置先を決めます。
-3. Node上でGolden Imageからqcow2 overlayを作り、1 Job専用のJIT設定でRunnerを起動します。
-4. Job終了後、ホストが停止と所有権を確認してからVM・作業ディスクを削除します。
-
-### 用語
-
-| 用語 | 意味 |
-|---|---|
-| **Controller** | GitHub連携、配置判断、状態DB、Node認証を担当する管理プロセス |
-| **Node / Agent** | VM、libvirt、専用ネットワーク、ローカル資源を管理する実行マシン |
-| **Pool** | 1台のVMに割り当てるCPU・RAM・ディスク・最大台数・Runner名の定義 |
-| **Golden Image** | Ubuntuと公式Actions Runnerを入れた、未登録の読み取り専用元イメージ |
-| **Reservation** | 特定Pool用にNode資源を取り置く管理者定義の枠 |
-
-Workflowから任意のCPU量を指定するのではなく、管理者が事前に定義したPoolを `runs-on` で選びます。
+- Workflow は CPU 数を書きません。管理者が決めた Pool を `runs-on` で選びます。
+- GitHub 上で Job が success でも、VM の CPU / RAM / ディスクは **ホストが消したと確認するまで** 返しません。
+- CLI を入れただけでは、service は起動せず、ネットワークも変わりません。
 
 ```yaml
 jobs:
@@ -63,70 +38,197 @@ jobs:
       - run: python3 --version
 ```
 
-## 1台で使い始める流れ
+## 迷ったらここから
 
-最初は1台のUbuntu PCをControllerとNodeの兼用にすると、構成を理解しやすくなります。
+| やりたいこと | 読む場所 |
+|---|---|
+| 1台で最初の Job まで | 下の「1台で動かす」→ 全文は [QUICKSTART.ja.md](docs/QUICKSTART.ja.md) |
+| CLI の入れ方・更新・削除 | [INSTALL.md](docs/INSTALL.md) |
+| `github check` などが落ちる | [TROUBLESHOOTING.ja.md](docs/TROUBLESHOOTING.ja.md) |
+| 2台目の PC を足す | [MULTI_NODE.ja.md](docs/MULTI_NODE.ja.md) |
+| 止める・backup・更新 | [OPERATIONS.ja.md](docs/OPERATIONS.ja.md) |
+| 設計・検証の境界 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) · [VERIFICATION.md](docs/VERIFICATION.md) |
 
-```text
-1. CLIとホスト依存関係を入れる
-2. GitHub AppとRunner Groupを用意する
-3. Golden Imageを作る
-4. setupでPoolと資源上限を決め、設定・CA・Node IDを保存する
-5. image importとnetwork applyを明示実行する
-6. github check後にController/Agentを起動する
-7. 手動Workflowを実行し、VM削除まで確認する
+## 用語
+
+| 用語 | 意味 |
+|---|---|
+| **Controller** | GitHub とのやり取り、配置、SQLite、Node 認証 |
+| **Node / Agent** | その PC で VM と専用ネットワークを実際に操作する側 |
+| **Pool** | VM の大きさ・上限・Workflow が書く `runs-on` 名 |
+| **Golden Image** | Ubuntu + 公式 Runner 入りの、まだ登録していない読み取り専用イメージ |
+| **Reservation** | 特定 Pool 用に、その Node の枠を先に押さえる設定 |
+
+## GitHub で「何が private か」
+
+言葉が混ざります。Job を流してよいかどうかに関係するのは **1行目だけ** です。
+
+| よく出る「private」 | 意味 | Job を流せるか |
+|---|---|---|
+| GitHub リポジトリが **private** | その repo の可視性 | **関係する。今の版はこれだけ許可** |
+| credential を 0600 のファイルに置く | 鍵の置き方 | 関係しない |
+| `172.30.240.0/24` | VM 用の LAN | 関係しない |
+| RunnerLoom 本体の GitHub repo が公開 | このソフトの置き場 | **関係しない。本体は公開してよい** |
+
+許可は次が揃っているときだけです。`github check` がこれを API で見ます。
+
+1. Cluster 設定の `github.allowedRepositories`（`owner/name` の一覧）
+2. そのそれぞれが GitHub 上で **private**
+3. Organization の場合だけ: Runner Group が **Selected repositories**、**public を許可しない**、選択リストが 1. と **完全一致**
+
+`github.url` の形で 3. が変わる点に注意してください。
+
+| `github.url` | 例 | 追加チェック |
+|---|---|---|
+| Organization | `https://github.com/my-org` | Runner Group の選択リストまで見る |
+| リポジトリ1つ | `https://github.com/my-org/app` | `allowedRepositories` はその1つだけ。Group のリスト照合はしない |
+
+Workflow は、許可した **その private リポジトリ** に置き、`runs-on` に Pool の `runnerName` を書きます。ラベルが合っていても、public なら受けません。
+
+非公開でも、その repo の push や依存関係は VM 内でコードが走ります。秘密を渡すなら、そのリポジトリを信用している、という意味です。詳細は [SECURITY.md](SECURITY.md) です。
+
+## 1台で動かす
+
+1台の Ubuntu 24.04 を Controller と Node の兼用にします。値の決め方と画面操作の全文は [QUICKSTART.ja.md](docs/QUICKSTART.ja.md) です。
+
+### 0. 使う値
+
+```bash
+export RL_CONTROLLER_STATE="/var/lib/runnerloom/controller"
+export RL_NODE_NAME="node-a"
+export RL_NODE_STATE="/var/lib/runnerloom/node-a"
+export RL_DISK_DIR="/var/lib/libvirt/images/runnerloom-home-node-a"
+export RL_CONTROLLER_URL="https://127.0.0.1:8443"
+export RL_NETWORK_CIDR="172.30.240.0/24"
+export RL_IMAGE="/var/lib/runnerloom/builds/ubuntu-runner.qcow2"
+export RL_POOL="linux-lite"
+export RL_BINARY="$(command -v runnerloom)"
 ```
 
-コマンド、置換する値、各段階の成功条件は [1台構成セットアップ](docs/QUICKSTART.ja.md) にまとめています。
+### 1. CLI と KVM
 
-> [!WARNING]
-> `runnerloom setup --apply` は「すべて完了」を意味しません。設定、Controller CA、Node IDを保存しますが、GitHub接続確認、VMネットワーク変更、サービス起動、実Job検証は別の明示操作です。
-
-## どの操作がホストを変更するか
-
-| 操作 | 変更内容 |
-|---|---|
-| `.deb` / archiveのインストール | CLIバイナリと文書を配置。サービス・ネットワークは起動しない |
-| `setup --apply` | 指定したstate directoryへ設定、CA、Node IDを保存 |
-| `image build` | 指定先へGolden Imageとmanifestを新規作成 |
-| `image import` | Controllerの配布用Image cacheへ検証済みイメージを登録 |
-| `cache seed` | 同一filesystemのController/Node cacheを検証済みhard linkで共有 |
-| `cache prune --apply` | 所有service停止と再検査後、参照されない古いImage/partialだけを削除 |
-| `network apply` | RunnerLoom専用libvirt networkとfirewall規則を作成 |
-| `service install --start` | RunnerLoom用systemd unitを生成して起動 |
-| GitHub Job | 使い捨てVMと作業ディスクを作成し、完了後に所有確認して削除 |
-
-RunnerLoomはインストールだけで既存ネットワークを書き換えたり、Nodeを勝手に登録したり、サービスを自動起動したりしません。
-
-## 主な機能
-
-- 1台兼用からLAN内の複数Nodeまで同じCLIで管理
-- official `actions/scaleset`連携と1 Job専用JIT設定
-- SQLite transactionによるCPU・RAM・ディスク会計、予約枠、再実行保護
-- Node承認、TLS 1.3、証明書更新、失効確認
-- libvirt/KVM、qcow2 overlay、cloud-init、所有権を確認したcleanup
-- Canonical署名とRunner digestを検証するGolden Image builder
-- 参照・overlayを再検査するdry-run-first cache prune、Range再開download、同一Host hard-link seed
-- LAN、ホスト管理面、peer VMへの到達を制限する専用NAT/firewall
-- 人間向けCLIと、`--json` / JSON Schemaによる自動化向けインターフェース
-
-## 配布物
-
-GitHub ReleasesにはLinux/amd64 archive、Debian package、build information、`SHA256SUMS`があります。Repositoryが非公開の場合でも、公開化は必須ではありません。ログイン済みブラウザまたは認証済みGitHub CLIで取得できます。
-
-インストール後は次だけ確認し、その後 [Quickstart](docs/QUICKSTART.ja.md) へ進みます。
+[INSTALL.md](docs/INSTALL.md) で同じ Release の checksum を確認して CLI を入れます。続けて libvirt などを入れ、`doctor` が通ることを見ます。
 
 ```bash
 runnerloom version --json
-runnerloom doctor
-runnerloom --help --json
+sudo apt-get update
+sudo apt-get install -y qemu-kvm qemu-utils libvirt-daemon-system \
+  libvirt-clients cloud-image-utils libguestfs-tools nftables \
+  dnsmasq-base ubuntu-keyring curl gpgv jq
+sudo systemctl enable --now libvirtd
+runnerloom doctor --strict
 ```
 
-## 安全性と対応範囲
+### 2. GitHub App と Runner Group
 
-RunnerLoomは、ホスト管理者まで敵対する環境や、すべてのhypervisor脆弱性からの保護を保証するものではありません。現在のAgentはlibvirtとfirewallを操作する信頼済み特権プロセスであり、独立監査済みのprivilege-separated helperではありません。
+Organization なら Settings → Actions → Runner groups で Group を作ります。
 
-価値のあるRepository secretsを接続する前に、[SECURITY.md](SECURITY.md) と [VERIFICATION.md](docs/VERIFICATION.md) を読み、実ホストでネットワーク隔離、再起動復旧、資源上限、実GitHub Job、Job後の削除を確認してください。
+- Repository access: Selected repositories
+- 使う **private** リポジトリだけを選ぶ
+- Public repositories: 許可しない
+- 数値の Group ID を控える（`github.runnerGroupID`）
+
+専用 GitHub App を Organization に入れ、Self-hosted runners は Read and write、Metadata は Read-only。Client ID・Installation ID・`.pem` を 0600 で Controller state に置きます。手順のクリック順は [QUICKSTART §2](docs/QUICKSTART.ja.md#2-github側の利用許可を作る) です。この時点ではまだ `github check` しません。
+
+### 3. Golden Image
+
+```bash
+sudo install -d -m 0700 "$(dirname "$RL_IMAGE")"
+sudo runnerloom image build --out "$RL_IMAGE"
+export RL_IMAGE_DIGEST="$(sudo jq -er '.digest' "$RL_IMAGE.manifest.json")"
+```
+
+`registered` が `false`、digest が `sha256:` + 64 桁なら成功です。鍵はイメージに入りません。
+
+### 4. 設定を保存する（まだ起動しない）
+
+```bash
+sudo runnerloom setup \
+  --state "$RL_CONTROLLER_STATE" \
+  --role controller-node \
+  --node "$RL_NODE_NAME" \
+  --node-state "$RL_NODE_STATE" \
+  --disk-dir "$RL_DISK_DIR" \
+  --advertise "$RL_CONTROLLER_URL" \
+  --network-cidr "$RL_NETWORK_CIDR"
+```
+
+質問に答えたあと `--apply` します。ここで保存されるのは設定・CA・Node ID だけです。
+
+> [!WARNING]
+> `setup --apply` の成功は「動いている」ではありません。GitHub 確認、network、service、実 Job はまだです。
+
+### 5. Image 登録と専用ネットワーク
+
+```bash
+sudo runnerloom image import \
+  --state "$RL_CONTROLLER_STATE" \
+  --file "$RL_IMAGE" \
+  --digest "$RL_IMAGE_DIGEST"
+
+sudo runnerloom network plan --config "$RL_NODE_STATE/agent.json"
+sudo runnerloom network apply --config "$RL_NODE_STATE/agent.json"
+sudo runnerloom network check --config "$RL_NODE_STATE/agent.json"
+```
+
+`plan` を読んでから `apply` します。既存の LAN / VPN と CIDR が重なるときは別の `/24` で setup し直します。Node state と VM disk は同じ filesystem にしてください。
+
+### 6. 接続確認して起動する
+
+```bash
+sudo runnerloom github check --state "$RL_CONTROLLER_STATE"
+
+sudo runnerloom service install \
+  --role controller \
+  --state "$RL_CONTROLLER_STATE" \
+  --binary "$RL_BINARY" \
+  --listen 127.0.0.1:8443 \
+  --advertise "$RL_CONTROLLER_URL" \
+  --start
+
+sudo runnerloom service install \
+  --role agent \
+  --state "$RL_NODE_STATE" \
+  --config "$RL_NODE_STATE/agent.json" \
+  --binary "$RL_BINARY" \
+  --start
+
+sudo runnerloom pool explain "$RL_POOL" --state "$RL_CONTROLLER_STATE"
+```
+
+`github check` が落ちたら service は起動しません。初回は Image 取得中に `IMAGE_MISSING` が出ることがあります。journal を見て、消えてから `pool explain` を再実行します。
+
+### 7. 手動 Job と削除確認
+
+許可したリポジトリに、`runs-on` が Pool の `runnerName`（例: `home-linux-lite`）の手動 Workflow を置き、Actions から実行します。最初は Repository secrets を使わないでください。例は [QUICKSTART §7](docs/QUICKSTART.ja.md#7-最初のgithub-actions-jobを実行する) です。
+
+```bash
+sudo runnerloom vm list --state "$RL_CONTROLLER_STATE"
+sudo runnerloom status --state "$RL_CONTROLLER_STATE"
+```
+
+GitHub 側が success でも、VM が `Deleted` になり保持資源が 0 になるまで、1台構成は完了しません。
+
+## どの操作がホストを変更するか
+
+| 操作 | 実際に変わるもの |
+|---|---|
+| CLI の `.deb` / archive | バイナリと文書だけ。service は起動しない |
+| `setup --apply` | state へ設定・CA・Node ID |
+| `image build` / `image import` | qcow2 と Controller の image cache |
+| `network apply` | RunnerLoom 専用の libvirt 網と firewall だけ |
+| `service install --start` | systemd unit を作って起動 |
+| 実 GitHub Job | その Job の VM と作業ディスク。終わったら所有確認して削除 |
+
+## よくある詰まり
+
+| 症状 | 先に見ること |
+|---|---|
+| `github check` が失敗 | 許可 repo が GitHub 上で private か。Group が Selected で public オフか。選択リストと設定が同じ集合か。App の権限と 0600 の credential |
+| `setup --apply` したのに動かない | 正常。続けて import / network / `github check` / service / 実 Job |
+| Job が来ない・`NO_CAPACITY` | `runnerloom pool explain <pool>`。Image・network・資源・Node 許可の理由コードが出る |
+
+切り分けのコマンドは [TROUBLESHOOTING.ja.md](docs/TROUBLESHOOTING.ja.md) です。2台目は [MULTI_NODE.ja.md](docs/MULTI_NODE.ja.md)、止める・backup は [OPERATIONS.ja.md](docs/OPERATIONS.ja.md) です。
 
 ## 開発
 
@@ -134,8 +236,8 @@ RunnerLoomは、ホスト管理者まで敵対する環境や、すべてのhype
 make check
 ```
 
-How to contribute is [CONTRIBUTING.md](CONTRIBUTING.md). What tests prove, and do not prove, is [TESTING.md](docs/TESTING.md). CI treats unit/integration tests, real Ubuntu VMs, Golden Images, packaging, and vulnerability scans as separate evidence.
+[CONTRIBUTING.md](CONTRIBUTING.md) · [TESTING.md](docs/TESTING.md) · [VERIFICATION.md](docs/VERIFICATION.md)
 
 ## License
 
-MIT。詳細は [LICENSE](LICENSE) を参照してください。第三者コンポーネントは各ライセンスに従います。
+MIT。[LICENSE](LICENSE) を参照してください。
