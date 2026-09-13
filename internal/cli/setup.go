@@ -29,7 +29,7 @@ func (a *App) prompt(r *bufio.Reader, label, fallback string) (string, error) {
 	if a.NonInteractive {
 		return "", core.Fail("MISSING_INPUT", "非対話ではJSON設定と必要なフラグを指定してください", label)
 	}
-	_, _ = fmt.Fprintf(a.Err, "%s [%s]: ", label, fallback)
+	_, _ = fmt.Fprintf(a.Err, "%s [%s]: ", interactiveSafe(label), interactiveSafe(fallback))
 	s, e := r.ReadString('\n')
 	if e != nil {
 		return "", e
