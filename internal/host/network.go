@@ -270,7 +270,7 @@ func (n Network) Apply(ctx context.Context) error {
 		return nil
 	}
 	// Do not rewrite a live network while any RunnerLoom VM uses it.
-	b, e := n.Exec.Run(ctx, "virsh", []string{"--connect", "qemu:///system", "list", "--name"}, nil)
+	b, e := n.Exec.Run(ctx, "virsh", []string{"--connect", "qemu:///system", "list", "--all", "--name"}, nil)
 	if e != nil {
 		return e
 	}

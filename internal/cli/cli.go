@@ -291,20 +291,35 @@ func (a *App) Command() *cobra.Command {
 		if e != nil {
 			return e
 		}
-		if _, e = os.Lstat(inviteOut); !os.IsNotExist(e) {
-			return errors.New("招待の保存先は新規ファイルにしてください")
-		}
 		if e = core.PrivateDir(filepath.Dir(inviteOut)); e != nil {
 			return e
 		}
+		f, e := os.OpenFile(inviteOut, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		if e != nil {
+			if os.IsExist(e) {
+				return errors.New("招待の保存先は新規ファイルにしてください")
+			}
+			return e
+		}
+		published := false
+		defer func() {
+			_ = f.Close()
+			if !published {
+				_ = os.Remove(inviteOut)
+			}
+		}()
 		v, e := s.Invite(c.Context(), ca, endpoint, ttl)
 		if e != nil {
 			return e
 		}
 		b, _ := json.MarshalIndent(v, "", "  ")
-		if e = core.WritePrivate(inviteOut, b); e != nil {
+		if _, e = f.Write(b); e != nil {
 			return e
 		}
+		if e = f.Sync(); e != nil {
+			return e
+		}
+		published = true
 		return a.output(map[string]any{"path": inviteOut, "expires": v.Expires, "fingerprint": v.Fingerprint})
 	})
 	invite.Flags().StringVar(&endpoint, "url", "", "Nodeから到達できるhttps://Controller:port")
@@ -469,6 +484,11 @@ func (a *App) Command() *cobra.Command {
 				}
 				return a.output(p)
 			case "apply":
+				lock, e := core.AcquireLock(conf.StateDir, "agent")
+				if e != nil {
+					return e
+				}
+				defer lock.Close()
 				if e = n.Apply(c.Context()); e != nil {
 					return e
 				}

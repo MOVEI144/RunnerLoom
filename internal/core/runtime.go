@@ -24,6 +24,28 @@ func (s *Store) RefreshDemand(ctx context.Context, pool string, desired int64) e
 	return e
 }
 
+func (s *Store) SetDemandBarrier(ctx context.Context, pool string, blocked bool) error {
+	if !ValidName(pool) {
+		return errors.New("invalid demand")
+	}
+	v := 0
+	if blocked {
+		v = 1
+	}
+	r, e := s.DB.ExecContext(ctx, "UPDATE demand SET barrier=? WHERE pool=?", v, pool)
+	if e != nil {
+		return e
+	}
+	n, e := r.RowsAffected()
+	if e != nil {
+		return e
+	}
+	if n == 0 {
+		return errors.New("demand not found")
+	}
+	return nil
+}
+
 type Lock struct{ file *os.File }
 
 func AcquireLock(dir, name string) (*Lock, error) {

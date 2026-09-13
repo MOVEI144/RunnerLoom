@@ -163,14 +163,21 @@ func (a *auth) CheckAccess(ctx context.Context, c core.Config) error {
 			return core.Fail("PUBLIC_REPOSITORY_DISABLED", "初期版は明示した非公開Repositoryのみ利用できます", repo)
 		}
 	}
-	if len(scope) == 2 {
-		return nil
+	if e := a.checkRunnerGroup(ctx, c, scope[0]); e != nil {
+		if len(scope) == 2 && strings.Contains(e.Error(), "HTTP 404") {
+			return nil
+		}
+		return e
 	}
+	return nil
+}
+
+func (a *auth) checkRunnerGroup(ctx context.Context, c core.Config, owner string) error {
 	var group struct {
 		Visibility   string `json:"visibility"`
 		AllowsPublic bool   `json:"allows_public_repositories"`
 	}
-	path := fmt.Sprintf("/orgs/%s/actions/runner-groups/%d", url.PathEscape(scope[0]), c.GitHub.RunnerGroupID)
+	path := fmt.Sprintf("/orgs/%s/actions/runner-groups/%d", url.PathEscape(owner), c.GitHub.RunnerGroupID)
 	if e := a.get(ctx, path, &group); e != nil {
 		return e
 	}
@@ -347,11 +354,37 @@ func PersistThenAcknowledge(ctx context.Context, s *core.Store, session string, 
 		ids = append(ids, v.RunnerRequestID)
 	}
 	if len(ids) > 0 {
-		if _, e := acquire(ctx, ids); e != nil {
-			return e
+		got, e := acquire(ctx, ids)
+		if e != nil || !acquiredAll(ids, got) {
+			_ = s.SetDemandBarrier(ctx, p.Name, true)
+			if e != nil {
+				return e
+			}
+			return errors.New("scale-set job acquisition incomplete")
 		}
 	}
-	return ack(ctx, msg.MessageID)
+	if e := ack(ctx, msg.MessageID); e != nil {
+		_ = s.SetDemandBarrier(ctx, p.Name, true)
+		return e
+	}
+	return s.SetDemandBarrier(ctx, p.Name, false)
+}
+
+func acquiredAll(want, got []int64) bool {
+	if len(want) == 0 {
+		return true
+	}
+	have := map[int64]int{}
+	for _, id := range got {
+		have[id]++
+	}
+	for _, id := range want {
+		if have[id] == 0 {
+			return false
+		}
+		have[id]--
+	}
+	return true
 }
 func (m *Manager) listen(ctx context.Context, p core.Pool, b Binding) error {
 	session, e := m.Client.MessageSessionClient(ctx, b.ScaleSetID, "runnerloom-"+m.Config.Name+"-"+p.Name, scaleset.WithRetryableHTTPClint(newScaleSetHTTPClient()))
@@ -371,6 +404,7 @@ func (m *Manager) listen(ctx context.Context, p core.Pool, b Binding) error {
 		return e
 	}
 	last := 0
+	delay := time.Second
 	for {
 		msg, e := session.GetMessage(ctx, last, int(p.MaxRunners))
 		if e != nil {
@@ -383,10 +417,30 @@ func (m *Manager) listen(ctx context.Context, p core.Pool, b Binding) error {
 			continue
 		}
 		if e = PersistThenAcknowledge(ctx, m.Store, session.Session().SessionID.String(), p, msg, session.DeleteMessage, session.AcquireJobs); e != nil {
-			return errors.New("scale-set message processing failed; message not silently discarded")
+			if ctx.Err() != nil {
+				return nil
+			}
+			m.Log.Warn("scale-set message processing deferred", "pool", p.Name, "error", e.Error())
+			t := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				t.Stop()
+				return nil
+			case <-t.C:
+			}
+			delay = min(delay*2, 30*time.Second)
+			continue
 		}
+		delay = time.Second
 		last = msg.MessageID
 	}
+}
+
+func discardJIT(ctx context.Context, api JITAPI, jit *scaleset.RunnerScaleSetJitRunnerConfig) {
+	if jit == nil || jit.Runner == nil || jit.Runner.ID <= 0 {
+		return
+	}
+	_ = api.RemoveRunner(ctx, int64(jit.Runner.ID))
 }
 
 // Reconcile provisions only within the shared transactional resource ledger.
@@ -455,10 +509,12 @@ func Reconcile(ctx context.Context, s *core.Store, p core.Pool, setID int, api J
 			if e != nil || jit == nil || jit.Runner == nil {
 				return errors.New("JIT runner creation failed")
 			}
-			if jit.Runner.Name != a.Name() {
+			if jit.Runner.Name != a.Name() || (jit.Runner.RunnerScaleSetID != 0 && jit.Runner.RunnerScaleSetID != setID) {
+				discardJIT(ctx, api, jit)
 				return errors.New("JIT identity mismatch")
 			}
 			if e = s.SetJIT(ctx, a.ID, int64(jit.Runner.ID), jit.EncodedJITConfig); e != nil {
+				discardJIT(ctx, api, jit)
 				return e
 			}
 		}
@@ -491,7 +547,7 @@ func (m *Manager) Run(ctx context.Context) error {
 					return
 				}
 				if e != nil {
-					m.Log.Warn("GitHub listener reconnecting", "pool", p.Name)
+					m.Log.Warn("GitHub listener reconnecting", "pool", p.Name, "error", e.Error())
 				}
 				t := time.NewTimer(delay)
 				select {

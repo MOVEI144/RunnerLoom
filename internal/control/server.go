@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -65,7 +66,8 @@ func (s *Server) node(r *http.Request) (string, error) {
 	if e != nil {
 		return "", e
 	}
-	return n, s.Store.Authorize(r.Context(), n)
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: r.TLS.PeerCertificates[0].Raw})
+	return n, s.Store.AuthorizePeer(r.Context(), n, certPEM)
 }
 func (s *Server) allowEnrollment(ip string) bool {
 	s.mu.Lock()
@@ -142,14 +144,26 @@ func (s *Server) Handler() http.Handler {
 			failure(w, 400, e)
 			return
 		}
-		pub, _ := x509.MarshalPKIXPublicKey(csr.PublicKey)
-		old, _ := x509.MarshalPKIXPublicKey(r.TLS.PeerCertificates[0].PublicKey)
+		pub, e := x509.MarshalPKIXPublicKey(csr.PublicKey)
+		if e != nil {
+			failure(w, 400, e)
+			return
+		}
+		old, e := x509.MarshalPKIXPublicKey(r.TLS.PeerCertificates[0].PublicKey)
+		if e != nil {
+			failure(w, 500, e)
+			return
+		}
 		if core.Hash(pub) != core.Hash(old) {
 			failure(w, 403, core.Fail("KEY_MISMATCH", "自動更新では既存のNode鍵を使用してください", nil))
 			return
 		}
 		cert, e := s.CA.Sign(q.CSR, s.Cluster, name)
 		if e != nil {
+			failure(w, 500, e)
+			return
+		}
+		if e = s.Store.UpdateIdentityCertificate(r.Context(), name, cert); e != nil {
 			failure(w, 500, e)
 			return
 		}
@@ -174,10 +188,24 @@ func (s *Server) Handler() http.Handler {
 		node, ok := c.Node(name)
 		allowed := false
 		if ok {
+			full := "sha256:" + digest
 			for _, p := range c.Pools {
 				im, _ := c.Image(p.Image)
-				if c.Eligible(p, node) && im.Digest == "sha256:"+digest {
+				if p.Enabled && c.Eligible(p, node) && im.Digest == full {
 					allowed = true
+				}
+			}
+			if !allowed {
+				runs, e := s.Store.Instances(r.Context())
+				if e != nil {
+					failure(w, 500, e)
+					return
+				}
+				for _, inst := range runs {
+					if inst.Node == name && inst.State != "Deleted" && inst.Image.Digest == full {
+						allowed = true
+						break
+					}
 				}
 			}
 		}
