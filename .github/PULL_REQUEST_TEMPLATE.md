@@ -1,7 +1,8 @@
 ## What and why
 
 ## Verification
-- [ ] Unit/race tests and vet
+See `docs/TESTING.ja.md` for which checks prove what.
+- [ ] `make check` (gofmt, vet, race tests)
 - [ ] Regression test fails before the fix
 - [ ] Actual VM qualification when host/image/network behavior changes
 - [ ] Package/schema/docs match CLI behavior

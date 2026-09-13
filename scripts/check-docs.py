@@ -20,6 +20,8 @@ DOCS = (
     ROOT / "docs" / "MULTI_NODE.ja.md",
     ROOT / "docs" / "OPERATIONS.ja.md",
     ROOT / "docs" / "TROUBLESHOOTING.ja.md",
+    ROOT / "docs" / "TESTING.ja.md",
+    ROOT / "CONTRIBUTING.md",
 )
 LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 FENCE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")

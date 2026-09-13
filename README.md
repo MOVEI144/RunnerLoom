@@ -131,12 +131,10 @@ RunnerLoomは、ホスト管理者まで敵対する環境や、すべてのhype
 ## 開発
 
 ```bash
-go test -race -count=1 ./...
-go vet ./...
-go build -trimpath -o runnerloom ./cmd/runnerloom
+make check
 ```
 
-CIではunit/integration testに加え、実Ubuntu VM lifecycle、Golden Image build/boot、package、binary vulnerability scanを別々の証拠として扱います。
+変更の出し方は [CONTRIBUTING.md](CONTRIBUTING.md)、テストが証明すること／しないことは [テスト方針](docs/TESTING.ja.md) です。CIの unit/integration、実Ubuntu VM、Golden Image、梱包、脆弱性スキャンは別々の証拠です。
 
 ## License
 

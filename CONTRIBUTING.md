@@ -1,32 +1,44 @@
 # Contributing
 
-Use the Go version declared by the repository. Run `make check` before opening
-a pull request. Packaging requires Python 3.12 or newer (`python3.12` by default;
-override `PYTHON` for `make package`). The pinned Ubuntu 24.04 CI image provides
-Python 3.12, which the packaging and release steps invoke explicitly.
-Preserve exact dependency versions and commit `go.sum` changes.
-New resource mutations need restart/replay tests, capacity changes need
-concurrent tests, and destructive host operations need ownership-negative tests.
+PRを出す前に、このリポジトリのルートで `make check` を通してください。
+テストの層、CIジョブ、緑のチェックが証明しないことは [テスト方針](docs/TESTING.ja.md) にあります。
 
-The repository-wide `go test ./...` command is supported directly on macOS. The
-test-only `TestMain` harness canonicalizes macOS's temporary path before
-`t.TempDir()` is used; do not weaken `core.PrivateDir` or production symlink
-rejection to make a test pass.
+## 必要なもの
 
-The `control` integration suite uses real TLS, HTTP and SQLite with explicitly
-mocked GitHub/hypervisor providers. Do not relabel those tests as real VM tests.
-The dedicated CI jobs boot actual VMs on GitHub-owned ephemeral hosts.
+- `go.mod` に書いてある Go
+- 梱包だけ Python 3.12（`make package`。`PYTHON` で上書き可）
+- `go.sum` の変更はコミットする
 
-Do not run `network apply`, `service install` or real VM tests on someone else's
-host without explicit permission. The CI wrapper refuses non-CI execution;
-`smoke-vm` is the explicit operator-facing command. Never add production GitHub
-credentials or invitation secrets to test fixtures or CI logs.
+```bash
+make check
+```
 
-Controller compaction must be previewed with `runnerloom maintenance compact`
-and applied only while the Controller service is stopped. Never delete instance,
-inbox, enrollment, image or unknown host state merely because it is old.
+`make check` は `gofmt`、`go vet`、`go test -race -count=1 ./...`、関連シェルの構文確認です。
+実VM、Golden Image、`.deb` 梱包は含みません。
 
-Documentation and CLI help must identify unverified/unsupported operations
-rather than report a successful setup merely because a JSON file was written.
-User-facing errors should say what was checked and which changes were not made.
-Security-sensitive reports belong in the private channel described in SECURITY.md.
+## 変更の種類と必須テスト
+
+| 変えるもの | 最低限必要なもの |
+|---|---|
+| 設定・JSON・CLIの表示 | 既存の CLI / decode テスト。flag名は `runnerloom --help --json`、設定キーは `runnerloom config schema` が正 |
+| 資源会計・予約・配置 | 再実行（replay）と競合（concurrent）のテスト |
+| 停止・削除・network・cache prune | 所有していない資源を消さない否定テスト |
+| libvirt / イメージ / 隔離 | CIの実VMジョブ、または `smoke-vm`。mockの `control` 統合テストを実VM合格と言わない |
+| 文書 | `python3.12 scripts/check-docs.py` |
+
+macOSホストは対象外です。CIでも macOS は回しません。
+手元が macOS でも `go test ./...` は通る想定です。テスト専用の `TestMain` が `/var` の互換symlinkを避けます。本番の `PrivateDir` やsymlink拒否を緩めないでください。
+
+## やってはいけないこと
+
+- 他人のホストで `network apply`、`service install`、実VMテストを、明示的な許可なしに実行する
+- CI専用ラッパーをローカルで実VM経路として使う。オペレーター向けは `smoke-vm`
+- 本番の GitHub 認証、招待秘密、JIT をテストやCIログに入れる
+- 古いという理由だけで instance、inbox、enrollment、image、不明なホスト状態を消す。`maintenance compact` は dry-run が既定で、適用は Controller 停止中だけ
+- JSONを書いただけでセットアップ成功と書く。未確認の操作は未確認と書く
+- 脆弱性の公開Issueに秘密情報を載せる。報告先は [SECURITY.md](SECURITY.md)
+
+## 文書
+
+オペレーター向け手順は [docs/README.md](docs/README.md) から探します。
+設計は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、合格済み証拠は [docs/VERIFICATION.md](docs/VERIFICATION.md) です。
