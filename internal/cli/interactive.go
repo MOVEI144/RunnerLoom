@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/MOVEI144/RunnerLoom/internal/core"
 	"github.com/mattn/go-isatty"
@@ -76,6 +77,7 @@ func readInteractiveLine(r io.Reader) (string, error) {
 			default:
 				if b.Len() >= interactiveInputLimit {
 					return "", errors.New("対話入力が長すぎます")
+				}
 				b.WriteByte(one[0])
 			}
 		} else if err == nil {
@@ -99,9 +101,9 @@ func interactiveSafe(value string) string {
 
 func (a *App) interactivePrompt(label, fallback string) (string, error) {
 	if fallback == "" {
-		_, _ = fmt.Fprintf(a.Err, "%s: ", label)
+		_, _ = fmt.Fprintf(a.Err, "%s: ", interactiveSafe(label))
 	} else {
-		_, _ = fmt.Fprintf(a.Err, "%s [%s]: ", label, interactiveSafe(fallback))
+		_, _ = fmt.Fprintf(a.Err, "%s [%s]: ", interactiveSafe(label), interactiveSafe(fallback))
 	}
 	value, err := readInteractiveLine(a.In)
 	if err != nil {
@@ -115,9 +117,9 @@ func (a *App) interactivePrompt(label, fallback string) (string, error) {
 
 func (a *App) interactiveChoose(title string, items []interactiveMenuItem) (string, error) {
 	for {
-		_, _ = fmt.Fprintf(a.Err, "\n%s\n", title)
+		_, _ = fmt.Fprintf(a.Err, "\n%s\n", interactiveSafe(title))
 		for _, item := range items {
-			_, _ = fmt.Fprintf(a.Err, "  %s. %s\n", item.Key, item.Label)
+			_, _ = fmt.Fprintf(a.Err, "  %s. %s\n", interactiveSafe(item.Key), interactiveSafe(item.Label))
 		}
 		value, err := a.interactivePrompt("選択", "")
 		if err != nil {
@@ -155,7 +157,7 @@ func (a *App) interactiveAbsolutePath(label, fallback string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if filepath.IsAbs(value) && filepath.Clean(value) == value && value != "/" {
+		if filepath.IsAbs(value) && filepath.Clean(value) == value && value != "/" && strings.IndexFunc(value, unicode.IsControl) == -1 {
 			return value, nil
 		}
 		_, _ = fmt.Fprintln(a.Err, "正規化済みの絶対パスを入力してください。")
@@ -172,6 +174,19 @@ func (a *App) interactiveName(label, fallback string) (string, error) {
 			return value, nil
 		}
 		_, _ = fmt.Fprintln(a.Err, "英小文字で始まり、英小文字・数字・ハイフンだけの名前を入力してください。")
+	}
+}
+
+func (a *App) interactiveID(label string) (string, error) {
+	for {
+		value, err := a.interactiveRequired(label, "")
+		if err != nil {
+			return "", err
+		}
+		if core.ValidID(value) {
+			return value, nil
+		}
+		_, _ = fmt.Fprintln(a.Err, "32桁の小文字16進数IDを入力してください。")
 	}
 }
 
@@ -238,7 +253,7 @@ func (a *App) interactiveBool(label string, fallback bool) (bool, error) {
 }
 
 func (a *App) interactiveConfirm(summary, phrase string) (bool, error) {
-	_, _ = fmt.Fprintf(a.Err, "\n%s\n", summary)
+	_, _ = fmt.Fprintf(a.Err, "\n%s\n", interactiveSafe(summary))
 	value, err := a.interactivePrompt("続行するには "+phrase+" と正確に入力", "")
 	if err != nil {
 		return false, err
@@ -272,6 +287,9 @@ func (a *App) executeInteractiveCommand(ctx context.Context, args []string, allo
 	full := make([]string, 0, len(args)+3)
 	if !containsStateFlag(args) {
 		full = append(full, "--state", a.State)
+	}
+	if !allowPrompts {
+		full = append(full, "--non-interactive")
 	}
 	full = append(full, args...)
 	root.SetArgs(full)
@@ -592,7 +610,7 @@ func (a *App) runInteractiveNodes(ctx context.Context) error {
 			}
 		case "4":
 			a.interactiveRun(ctx, []string{"node", "pending"}, false)
-			id, promptErr := a.interactiveRequired("承認する申請ID", "")
+			id, promptErr := a.interactiveID("承認する申請ID")
 			if promptErr != nil {
 				return promptErr
 			}

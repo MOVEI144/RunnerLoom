@@ -75,7 +75,13 @@ func (a *App) Command() *cobra.Command {
 	root.PersistentFlags().StringVar(&a.State, "state", a.State, "Controllerの状態保存先（絶対パス）")
 	root.PersistentFlags().BoolVar(&a.JSON, "json", false, "安定したJSON出力。秘密情報は表示しません")
 	root.PersistentFlags().BoolVar(&a.NonInteractive, "non-interactive", false, "質問せず、不足設定はエラーとして返す")
-	root.RunE = func(c *cobra.Command, _ []string) error { return c.Help() }
+	a.addInteractive(root)
+	root.RunE = func(c *cobra.Command, _ []string) error {
+		if a.shouldStartInteractive() {
+			return a.runInteractive(c.Context())
+		}
+		return c.Help()
+	}
 	defaultHelp := root.HelpFunc()
 	root.SetHelpFunc(func(c *cobra.Command, args []string) {
 		if !a.JSON {

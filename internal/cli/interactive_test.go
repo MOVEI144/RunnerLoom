@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -129,7 +130,7 @@ func TestReadInteractiveLineReturnsFinalLineAtEOF(t *testing.T) {
 
 func TestReadInteractiveLinePropagatesReaderFailure(t *testing.T) {
 	_, err := readInteractiveLine(io.MultiReader(strings.NewReader(""), failingReader{}))
-	if err == nil || err.Error() != "boom" {
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
