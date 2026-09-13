@@ -2,6 +2,7 @@
 
 ## Verification
 See `docs/TESTING.ja.md` for which checks prove what.
+- [ ] Self-review of the diff before requesting review
 - [ ] `make check` (gofmt, vet, race tests)
 - [ ] Regression test fails before the fix
 - [ ] Actual VM qualification when host/image/network behavior changes

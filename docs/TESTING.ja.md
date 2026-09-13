@@ -61,7 +61,7 @@ runnerloom smoke-vm
 | RunnerLoom documentation | Reader paths and local links | 文書変更時 | 手順書のリンク・見出し | 設計の正しさ |
 | RunnerLoom v1 live acceptance | 手動 | workflow_dispatch | 許可した非公開Repositoryでの実Job | CIの代替 |
 
-macOSランナーは使いません。対象ホストは Ubuntu 24.04 x86_64 です。
+今のCIランナーと製品ホストは Ubuntu 24.04 x86_64 です。macOS / Windows ホストは将来対象にする可能性があり、今は資格がありません。CIでも macOS / Windows ランナーは使いません。
 
 ## パッケージが守ること
 

@@ -31,7 +31,7 @@
 | 検証済み範囲を確認する | [VERIFICATION.md](VERIFICATION.md) | mockと実VMの区別、合格済みCI、未検証領域 |
 | テストの意味を知る | [TESTING.ja.md](TESTING.ja.md) | ローカル、CIジョブ、緑でも証明しないこと |
 | v1の残作業を見る | [V1_ACCEPTANCE.md](V1_ACCEPTANCE.md) | 実環境で必要な受入試験と証拠 |
-| 変更に参加する | [CONTRIBUTING.md](../CONTRIBUTING.md) | `make check`、変更種別ごとの必須テスト、禁止事項 |
+| 変更に参加する | [CONTRIBUTING.md](../CONTRIBUTING.md) | `make check`、自分レビュー、変更種別ごとの必須テスト、禁止事項 |
 
 ## セットアップ文書の役割分担
 
