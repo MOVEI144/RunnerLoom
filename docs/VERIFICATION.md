@@ -16,7 +16,7 @@ Windows hosts are not qualified yet and may be added later; CI does not use
 those runners. A test-only `TestMain` harness still canonicalizes macOS `/var`
 so a laptop `go test ./...` does not hit production symlink rejection;
 `PrivateDir` itself is unchanged. The map of local commands, CI jobs and what a
-green check does not prove is in `docs/TESTING.ja.md`.
+green check does not prove is in `docs/TESTING.md`.
 
 The controller/agent integration tests use real TLS, HTTP, SQLite and the actual
 agent loop, with explicit GitHub and hypervisor test doubles. They are not

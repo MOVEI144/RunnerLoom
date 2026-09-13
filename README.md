@@ -134,7 +134,7 @@ RunnerLoomは、ホスト管理者まで敵対する環境や、すべてのhype
 make check
 ```
 
-変更の出し方は [CONTRIBUTING.md](CONTRIBUTING.md)、テストが証明すること／しないことは [テスト方針](docs/TESTING.ja.md) です。CIの unit/integration、実Ubuntu VM、Golden Image、梱包、脆弱性スキャンは別々の証拠です。
+How to contribute is [CONTRIBUTING.md](CONTRIBUTING.md). What tests prove, and do not prove, is [TESTING.md](docs/TESTING.md). CI treats unit/integration tests, real Ubuntu VMs, Golden Images, packaging, and vulnerability scans as separate evidence.
 
 ## License
 

@@ -1,57 +1,72 @@
 # Contributing
 
-PRを出す前に、このリポジトリのルートで `make check` を通してください。
-テストの層、CIジョブ、緑のチェックが証明しないことは [テスト方針](docs/TESTING.ja.md) にあります。
+Run `make check` from the repository root before opening a pull request.
+What each test layer proves, and what a green check does not prove, is in
+[docs/TESTING.md](docs/TESTING.md).
 
-## 必要なもの
+## Requirements
 
-- `go.mod` に書いてある Go
-- 梱包だけ Python 3.12（`make package`。`PYTHON` で上書き可）
-- `go.sum` の変更はコミットする
+- The Go version in `go.mod`
+- Python 3.12 only for packaging (`make package`; override with `PYTHON`)
+- Commit `go.sum` changes
 
 ```bash
 make check
 ```
 
-`make check` は `gofmt`、`go vet`、`go test -race -count=1 ./...`、関連シェルの構文確認です。
-実VM、Golden Image、`.deb` 梱包は含みません。
+`make check` runs `gofmt`, `go vet`, `go test -race -count=1 ./...`, and
+syntax checks on related shell scripts. It does not build a real VM, a
+Golden Image, or a `.deb`.
 
-## 出す前の自分レビュー
+## Self-review before you ask for review
 
-テストが通ったあと、PRにする前に自分の差分を通読してください。レビュー待ちに出す前に、作者が最初のレビュー担当です。
+After tests pass, read your own diff before opening the PR. The author is
+the first reviewer.
 
-確認すること:
+Check that:
 
-- 頼んでいないファイルや整形だけのノイズが入っていない
-- 秘密、招待、JIT、ホスト固有のパスや鍵が差分にない
-- 失敗のテストが、直した契約を実際に押さえている
-- 文書・`--help`・JSON が、まだやっていない操作を成功と書いていない
-- mockで見たことと、実VMや実GitHubで見ていないことを分けて書ける
+- The diff has no unsolicited files or formatting-only noise
+- Secrets, invitations, JIT configs, and host-specific paths or keys are absent
+- A failing test actually pins the contract you changed
+- Docs, `--help`, and JSON do not report unfinished work as success
+- You can describe what was seen with mocks versus what was not seen on a
+  real VM or live GitHub
 
-## 変更の種類と必須テスト
+## Required tests by change type
 
-| 変えるもの | 最低限必要なもの |
+| If you change | Minimum required |
 |---|---|
-| 設定・JSON・CLIの表示 | 既存の CLI / decode テスト。flag名は `runnerloom --help --json`、設定キーは `runnerloom config schema` が正 |
-| 資源会計・予約・配置 | 再実行（replay）と競合（concurrent）のテスト |
-| 停止・削除・network・cache prune | 所有していない資源を消さない否定テスト |
-| libvirt / イメージ / 隔離 | CIの実VMジョブ、または `smoke-vm`。mockの `control` 統合テストを実VM合格と言わない |
-| 文書 | `python3.12 scripts/check-docs.py` |
+| Config, JSON, or CLI output | Existing CLI / decode tests. Flag names come from `runnerloom --help --json`; config keys come from `runnerloom config schema` |
+| Resource accounting, reservations, or placement | Replay and concurrent tests |
+| Stop, delete, network, or cache prune | Negative tests that refuse to destroy unowned resources |
+| libvirt, images, or isolation | The CI real-VM jobs, or `smoke-vm`. Do not call the mocked `control` integration tests a real-VM pass |
+| Documentation | `python3.12 scripts/check-docs.py` |
 
-今の製品ホストとCIランナーは Ubuntu 24.04 x86_64 です。macOS も Windows も、ホストとしてはまだ資格がありません。将来対象にする可能性があるので、手元の都合で本番のパス検査、symlink拒否、OS前提を緩めないでください。
+The current product host and CI runners are Ubuntu 24.04 x86_64. macOS and
+Windows are not qualified hosts yet and may be added later. Do not weaken
+production path checks, symlink rejection, or OS assumptions to make a
+laptop test pass.
 
-手元が macOS でも `go test ./...` は通る想定です。テスト専用の `TestMain` が `/var` の互換symlinkを避けます。これはテストハーネスだけです。
+`go test ./...` is still expected to run on a macOS laptop. The test-only
+`TestMain` harness canonicalizes the `/var` compatibility symlink. That
+harness is not a production change.
 
-## やってはいけないこと
+## Do not
 
-- 他人のホストで `network apply`、`service install`、実VMテストを、明示的な許可なしに実行する
-- CI専用ラッパーをローカルで実VM経路として使う。オペレーター向けは `smoke-vm`
-- 本番の GitHub 認証、招待秘密、JIT をテストやCIログに入れる
-- 古いという理由だけで instance、inbox、enrollment、image、不明なホスト状態を消す。`maintenance compact` は dry-run が既定で、適用は Controller 停止中だけ
-- JSONを書いただけでセットアップ成功と書く。未確認の操作は未確認と書く
-- 脆弱性の公開Issueに秘密情報を載せる。報告先は [SECURITY.md](SECURITY.md)
+- Run `network apply`, `service install`, or real VM tests on someone else's
+  host without explicit permission
+- Use the CI-only wrappers as a local real-VM path; operators use `smoke-vm`
+- Put production GitHub credentials, invitation secrets, or JIT configs in
+  tests or CI logs
+- Delete instance, inbox, enrollment, image, or unknown host state merely
+  because it is old. `maintenance compact` is dry-run by default and must be
+  applied only while the Controller is stopped
+- Describe setup as complete because a JSON file was written. Say what was
+  not checked
+- File secrets in a public vulnerability issue. Use [SECURITY.md](SECURITY.md)
 
-## 文書
+## Documents
 
-オペレーター向け手順は [docs/README.md](docs/README.md) から探します。
-設計は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)、合格済み証拠は [docs/VERIFICATION.md](docs/VERIFICATION.md) です。
+Operator procedures start at [docs/README.md](docs/README.md).
+Design is [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Recorded evidence is
+[docs/VERIFICATION.md](docs/VERIFICATION.md).

@@ -20,7 +20,7 @@ DOCS = (
     ROOT / "docs" / "MULTI_NODE.ja.md",
     ROOT / "docs" / "OPERATIONS.ja.md",
     ROOT / "docs" / "TROUBLESHOOTING.ja.md",
-    ROOT / "docs" / "TESTING.ja.md",
+    ROOT / "docs" / "TESTING.md",
     ROOT / "CONTRIBUTING.md",
 )
 LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")

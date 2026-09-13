@@ -1,7 +1,7 @@
 ## What and why
 
 ## Verification
-See `docs/TESTING.ja.md` for which checks prove what.
+See `docs/TESTING.md` for which checks prove what.
 - [ ] Self-review of the diff before requesting review
 - [ ] `make check` (gofmt, vet, race tests)
 - [ ] Regression test fails before the fix
