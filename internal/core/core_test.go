@@ -104,6 +104,32 @@ func TestDisabledPoolImageIsNotDistributedToNode(t *testing.T) {
 	}
 }
 
+func TestDisabledPoolImageStaysAvailableForInFlightInstance(t *testing.T) {
+	s, c := testStore(t)
+	observe(t, s, c, 1)
+	v := allocate(t, s, "linux-lite")
+	for index := range c.Pools {
+		c.Pools[index].Enabled = false
+	}
+	plan, err := s.Plan(ctx, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Apply(ctx, plan.ID); err != nil {
+		t.Fatal(err)
+	}
+	reply := observe(t, s, c, 2, VMReport{ID: v.ID, State: "Unknown"})
+	found := false
+	for _, im := range reply.Images {
+		if im.Digest == c.Images[0].Digest {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("in-flight digest missing after pool disable: %+v", reply.Images)
+	}
+}
+
 func TestHardReservation(t *testing.T) {
 	s, c := testStore(t)
 	observe(t, s, c, 1)
@@ -375,13 +401,13 @@ func TestOmissionDoesNotDelete(t *testing.T) {
 func TestMessageDedupeAndDemandBarrier(t *testing.T) {
 	s, c := testStore(t)
 	observe(t, s, c, 1)
-	if e := s.PersistMessage(ctx, "session", 1, "linux-lite", 1, nil); e != nil {
+	if e := s.PersistMessage(ctx, "session", 1, "linux-lite", 1, nil, false); e != nil {
 		t.Fatal(e)
 	}
-	if e := s.PersistMessage(ctx, "session", 1, "linux-lite", 1, nil); e != nil {
+	if e := s.PersistMessage(ctx, "session", 1, "linux-lite", 1, nil, false); e != nil {
 		t.Fatal(e)
 	}
-	if e := s.PersistMessage(ctx, "session", 1, "linux-lite", 2, nil); code(e) != "MESSAGE_CONFLICT" {
+	if e := s.PersistMessage(ctx, "session", 1, "linux-lite", 2, nil, false); code(e) != "MESSAGE_CONFLICT" {
 		t.Fatal("message identity changed silently", e)
 	}
 	v := allocate(t, s, "linux-lite")

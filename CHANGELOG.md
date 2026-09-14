@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.0-rc.5
+
+Fifth Linux/amd64 CPU/LAN release candidate.
+
+- Keep an in-flight job-acquire fence separate from the host-stop demand barrier so `RefreshDemand` cannot unblock unacked `AcquireJobs`.
+- Treat GitHub account type `Organization` as fail-closed for runner-group lookup, including HTTP 404; skip the group API only for `User` accounts.
+- Advertise Golden Image digests to a Node that still has a non-deleted instance after its Pool is disabled.
+- Quote the official runner download URL inside the Golden Image builder and reject shell metacharacters in that URL.
+- Disable Actions Runner self-update on newly created scale sets so the guest keeps the image-pinned binary.
+- Remove leftover `internal-*` GitHub Actions and `scripts/apply-interactive-rc4.py`.
+- Document `release.yml` as the only publisher, index the interactive CLI, and use a fictional private repository in samples.
+
 ## 0.1.0-rc.4
 
 Fourth Linux/amd64 CPU/LAN release candidate, focused on fail-closed job intake and host lifecycle.

@@ -21,6 +21,7 @@
 |---|---|---|
 | CLIを入れる | [INSTALL.md](INSTALL.md) | Release取得、checksum、`.deb` / archive、更新、削除 |
 | 1台で始める | [QUICKSTART.ja.md](QUICKSTART.ja.md) | GitHub App、Golden Image、設定、network、service、初回Job |
+| 対話メニュー | [INTERACTIVE_CLI.ja.md](INTERACTIVE_CLI.ja.md) | 引数なしTTY起動、確認語、dry-run-first、`--json` との非併用 |
 | エラーを調べる | [TROUBLESHOOTING.ja.md](TROUBLESHOOTING.ja.md) | `doctor`、`github check`、`pool explain`、journal、代表的な理由コード |
 | Nodeを増やす | [MULTI_NODE.ja.md](MULTI_NODE.ja.md) | LAN用Controller URL、招待、承認、mTLS、任意の自動発見 |
 | 運用する | [OPERATIONS.ja.md](OPERATIONS.ja.md) | status、drain、Job停止、ログ、backup、maintenance、upgrade |

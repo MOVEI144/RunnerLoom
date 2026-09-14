@@ -163,13 +163,27 @@ func (a *auth) CheckAccess(ctx context.Context, c core.Config) error {
 			return core.Fail("PUBLIC_REPOSITORY_DISABLED", "初期版は明示した非公開Repositoryのみ利用できます", repo)
 		}
 	}
-	if e := a.checkRunnerGroup(ctx, c, scope[0]); e != nil {
-		if len(scope) == 2 && strings.Contains(e.Error(), "HTTP 404") {
-			return nil
-		}
+	kind, e := a.accountType(ctx, scope[0])
+	if e != nil {
 		return e
 	}
-	return nil
+	if strings.EqualFold(kind, "User") {
+		return nil
+	}
+	return a.checkRunnerGroup(ctx, c, scope[0])
+}
+
+func (a *auth) accountType(ctx context.Context, owner string) (string, error) {
+	var u struct {
+		Type string `json:"type"`
+	}
+	if e := a.get(ctx, "/users/"+url.PathEscape(owner), &u); e != nil {
+		return "", e
+	}
+	if u.Type == "" {
+		return "", errors.New("GitHub account type missing")
+	}
+	return u.Type, nil
 }
 
 func (a *auth) checkRunnerGroup(ctx context.Context, c core.Config, owner string) error {
@@ -299,7 +313,7 @@ func (m *Manager) bind(ctx context.Context, p core.Pool) (Binding, error) {
 	if existing != nil {
 		return binding, core.Fail("SCALE_SET_EXISTS", "同名のScale Setがあります。明示的なadoptが必要です", p.RunnerName)
 	}
-	set, e := m.Client.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{Name: p.RunnerName, RunnerGroupID: m.Config.GitHub.RunnerGroupID, Labels: []scaleset.Label{{Name: p.RunnerName, Type: "System"}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: false}})
+	set, e := m.Client.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{Name: p.RunnerName, RunnerGroupID: m.Config.GitHub.RunnerGroupID, Labels: []scaleset.Label{{Name: p.RunnerName, Type: "System"}}, RunnerSetting: scaleset.RunnerSetting{DisableUpdate: true}})
 	if e != nil || set == nil || set.ID <= 0 {
 		return binding, errors.New("GitHub scale-set creation failed; inspect before retrying an ambiguous response")
 	}
@@ -344,19 +358,19 @@ func PersistThenAcknowledge(ctx context.Context, s *core.Store, session string, 
 	for _, v := range msg.JobCompletedMessages {
 		events = append(events, core.RunnerEvent{Name: v.RunnerName, State: "Complete", Result: v.Result})
 	}
-	if e := s.PersistMessage(ctx, session, msg.MessageID, p.Name, int64(msg.Statistics.TotalAssignedJobs), events); e != nil {
-		return e
-	}
-	// Acquisition is idempotent on GitHub's runner-request IDs. Persisting first
-	// permits replay after a crash before ACK without losing the demand snapshot.
 	ids := []int64{}
 	for _, v := range msg.JobAvailableMessages {
 		ids = append(ids, v.RunnerRequestID)
 	}
+	if e := s.PersistMessage(ctx, session, msg.MessageID, p.Name, int64(msg.Statistics.TotalAssignedJobs), events, len(ids) > 0); e != nil {
+		return e
+	}
+	// Acquisition is idempotent on GitHub's runner-request IDs. Persisting first
+	// permits replay after a crash before ACK without losing the demand snapshot.
 	if len(ids) > 0 {
 		got, e := acquire(ctx, ids)
 		if e != nil || !acquiredAll(ids, got) {
-			_ = s.SetDemandBarrier(ctx, p.Name, true)
+			_ = s.SetIntakeFence(ctx, p.Name, true)
 			if e != nil {
 				return e
 			}
@@ -364,10 +378,15 @@ func PersistThenAcknowledge(ctx context.Context, s *core.Store, session string, 
 		}
 	}
 	if e := ack(ctx, msg.MessageID); e != nil {
-		_ = s.SetDemandBarrier(ctx, p.Name, true)
+		if len(ids) > 0 {
+			_ = s.SetIntakeFence(ctx, p.Name, true)
+		}
 		return e
 	}
-	return s.SetDemandBarrier(ctx, p.Name, false)
+	if len(ids) > 0 {
+		return s.SetIntakeFence(ctx, p.Name, false)
+	}
+	return nil
 }
 
 func acquiredAll(want, got []int64) bool {
@@ -400,7 +419,7 @@ func (m *Manager) listen(ctx context.Context, p core.Pool, b Binding) error {
 	if initial.Statistics == nil {
 		return errors.New("scale-set session statistics missing")
 	}
-	if e = m.Store.PersistMessage(ctx, initial.SessionID.String(), 0, p.Name, int64(initial.Statistics.TotalAssignedJobs), nil); e != nil {
+	if e = m.Store.PersistMessage(ctx, initial.SessionID.String(), 0, p.Name, int64(initial.Statistics.TotalAssignedJobs), nil, false); e != nil {
 		return e
 	}
 	last := 0

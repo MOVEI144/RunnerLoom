@@ -29,7 +29,7 @@ GitHubの [Releases](https://github.com/MOVEI144/RunnerLoom/releases) で、使�
 - `runnerloom-...-buildinfo.json`
 - `SHA256SUMS`
 
-Repositoryが非公開の場合、公開化する必要はありません。ログイン済みブラウザ、または認証済みGitHub CLIを使います。
+通常は公開Releaseから取得します。非公開forkから取る場合だけ、ログイン済みブラウザまたは認証済みGitHub CLIを使います。
 
 ```bash
 gh auth status

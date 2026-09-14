@@ -103,6 +103,29 @@ func TestPersistThenAcknowledgeRetryClearsBarrier(t *testing.T) {
 	}
 }
 
+func TestRefreshDemandDoesNotClearIntakeFence(t *testing.T) {
+	s := persistStore(t)
+	p := core.Example().Pools[0]
+	msg := &scaleset.RunnerScaleSetMessage{
+		MessageID:            11,
+		Statistics:           &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1},
+		JobAvailableMessages: []*scaleset.JobAvailable{{RunnerRequestID: 51}},
+	}
+	e := PersistThenAcknowledge(context.Background(), s, "sess", p, msg, func(context.Context, int) error { return nil }, func(context.Context, []int64) ([]int64, error) {
+		return nil, errors.New("temporary")
+	})
+	if e == nil {
+		t.Fatal("expected acquire failure")
+	}
+	if e = s.RefreshDemand(context.Background(), p.Name, 1); e != nil {
+		t.Fatal(e)
+	}
+	d, _ := s.Demands(context.Background())
+	if len(d) != 1 || !d[0].Blocked {
+		t.Fatal("statistics refresh cleared an in-flight acquire fence", d)
+	}
+}
+
 func TestPersistThenAcknowledgeFencesAcquireError(t *testing.T) {
 	s := persistStore(t)
 	p := core.Example().Pools[0]
