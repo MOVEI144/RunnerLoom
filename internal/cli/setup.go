@@ -51,7 +51,7 @@ func (a *App) wizard(r *bufio.Reader) (core.Config, error) {
 	if e != nil {
 		return c, e
 	}
-	s, e := a.prompt(r, "許可Repository（owner/repo、複数はカンマ区切り）", "MOVEI144/RunnerLoom")
+	s, e := a.prompt(r, "許可Repository（owner/repo、複数はカンマ区切り）", "example-org/private-app")
 	if e != nil {
 		return c, e
 	}

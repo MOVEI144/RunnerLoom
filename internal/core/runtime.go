@@ -20,19 +20,27 @@ func (s *Store) RefreshDemand(ctx context.Context, pool string, desired int64) e
 		return errors.New("invalid demand snapshot")
 	}
 	b, _ := json.Marshal(Demand{Pool: pool, Desired: desired, Seen: s.Now().UTC()})
-	_, e := s.DB.ExecContext(ctx, "INSERT INTO demand(pool,payload,barrier) VALUES(?,?,0) ON CONFLICT(pool) DO UPDATE SET payload=excluded.payload,barrier=0", pool, b)
+	_, e := s.DB.ExecContext(ctx, "INSERT INTO demand(pool,payload,barrier,intake) VALUES(?,?,0,0) ON CONFLICT(pool) DO UPDATE SET payload=excluded.payload,barrier=0", pool, b)
 	return e
 }
 
 func (s *Store) SetDemandBarrier(ctx context.Context, pool string, blocked bool) error {
-	if !ValidName(pool) {
+	return s.setDemandFlag(ctx, "barrier", pool, blocked)
+}
+
+func (s *Store) SetIntakeFence(ctx context.Context, pool string, blocked bool) error {
+	return s.setDemandFlag(ctx, "intake", pool, blocked)
+}
+
+func (s *Store) setDemandFlag(ctx context.Context, column, pool string, blocked bool) error {
+	if !ValidName(pool) || (column != "barrier" && column != "intake") {
 		return errors.New("invalid demand")
 	}
 	v := 0
 	if blocked {
 		v = 1
 	}
-	r, e := s.DB.ExecContext(ctx, "UPDATE demand SET barrier=? WHERE pool=?", v, pool)
+	r, e := s.DB.ExecContext(ctx, "UPDATE demand SET "+column+"=? WHERE pool=?", v, pool)
 	if e != nil {
 		return e
 	}
@@ -106,7 +114,7 @@ func SuggestedResources(dedicated bool) Resources {
 	return Resources{CPU: max(int64(1), cpus-reserve), Memory: max(int64(512), memory-reserveMem), Disk: 100}
 }
 func Example() Config {
-	return Config{APIVersion: Version, Name: "home", GitHub: GitHub{URL: "https://github.com/MOVEI144", RunnerGroupID: 1, CredentialFile: "/var/lib/runnerloom/controller/github-credentials.json", AllowedRepositories: []string{"MOVEI144/RunnerLoom"}}, Images: []Image{{Name: "ubuntu-24", Digest: "sha256:" + strings.Repeat("0", 64), MinimumRootGiB: 20}}, Nodes: []Node{{Name: "node-a", Budget: Resources{14, 24576, 300}, LocalCeiling: Resources{14, 24576, 300}, AllowedPools: []string{"linux-lite", "linux-heavy"}}}, Pools: []Pool{{Name: "linux-lite", RunnerName: "home-linux-lite", Image: "ubuntu-24", VCPU: 4, MemoryMiB: 4096, OverheadMiB: 512, RootGiB: 20, ScratchGiB: 0, DiskOverheadGiB: 2, MaxRunners: 3, WarmIdle: 0, ExecutionMinutes: 120, Enabled: true}, {Name: "linux-heavy", RunnerName: "home-linux-heavy", Image: "ubuntu-24", VCPU: 8, MemoryMiB: 8192, OverheadMiB: 512, RootGiB: 40, ScratchGiB: 0, DiskOverheadGiB: 2, MaxRunners: 1, WarmIdle: 0, ExecutionMinutes: 360, Enabled: true}}, Reservations: []Reservation{{Name: "heavy-reserved", Node: "node-a", Pool: "linux-heavy", Slots: 1}}}
+	return Config{APIVersion: Version, Name: "home", GitHub: GitHub{URL: "https://github.com/example-org", RunnerGroupID: 1, CredentialFile: "/var/lib/runnerloom/controller/github-credentials.json", AllowedRepositories: []string{"example-org/private-app"}}, Images: []Image{{Name: "ubuntu-24", Digest: "sha256:" + strings.Repeat("0", 64), MinimumRootGiB: 20}}, Nodes: []Node{{Name: "node-a", Budget: Resources{14, 24576, 300}, LocalCeiling: Resources{14, 24576, 300}, AllowedPools: []string{"linux-lite", "linux-heavy"}}}, Pools: []Pool{{Name: "linux-lite", RunnerName: "home-linux-lite", Image: "ubuntu-24", VCPU: 4, MemoryMiB: 4096, OverheadMiB: 512, RootGiB: 20, ScratchGiB: 0, DiskOverheadGiB: 2, MaxRunners: 3, WarmIdle: 0, ExecutionMinutes: 120, Enabled: true}, {Name: "linux-heavy", RunnerName: "home-linux-heavy", Image: "ubuntu-24", VCPU: 8, MemoryMiB: 8192, OverheadMiB: 512, RootGiB: 40, ScratchGiB: 0, DiskOverheadGiB: 2, MaxRunners: 1, WarmIdle: 0, ExecutionMinutes: 360, Enabled: true}}, Reservations: []Reservation{{Name: "heavy-reserved", Node: "node-a", Pool: "linux-heavy", Slots: 1}}}
 }
 
 type Check struct {

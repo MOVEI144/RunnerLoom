@@ -47,6 +47,7 @@ if len(matches)!=1: raise SystemExit('Runner asset missing or ambiguous')
 a=matches[0];digest=a.get('digest','');url=a.get('browser_download_url','');u=urllib.parse.urlparse(url)
 if not re.fullmatch(r'sha256:[a-f0-9]{64}',digest): raise SystemExit('GitHub release has no verified asset digest; refusing unverified download')
 if u.scheme!='https' or u.netloc!='github.com' or not u.path.startswith('/actions/runner/releases/download/'): raise SystemExit('Unexpected runner asset origin')
+if any(ch in url for ch in ('\'', '"', ' ', '\t', '\r', '\n')): raise SystemExit('Runner asset URL contains unsafe characters')
 (p/'runner.url').write_text(url);(p/'runner.sha256').write_text(digest[7:]);(p/'runner.version').write_text(tag[1:])
 PY
 echo 'Downloading and verifying official GitHub runner...' >&2
@@ -101,7 +102,7 @@ apt-get update -qq
 apt-get install -y --no-install-recommends ca-certificates curl git python3 python3-venv build-essential jq sudo
 getent passwd runner >/dev/null || useradd --create-home --shell /bin/bash runner
 install -d -m 0755 /opt/actions-runner
-curl --fail --location --retry 3 --connect-timeout 20 --max-time 900 --proto '=https' --tlsv1.2 '__URL__' -o /tmp/runner.tar.gz
+curl --fail --location --retry 3 --connect-timeout 20 --max-time 900 --proto '=https' --tlsv1.2 __URL__ -o /tmp/runner.tar.gz
 printf '%s  %s\n' '__DIGEST__' /tmp/runner.tar.gz | sha256sum --check -
 tar -xzf /tmp/runner.tar.gz -C /opt/actions-runner
 cd /opt/actions-runner
@@ -114,7 +115,7 @@ __HARDENING__
 apt-get clean
 rm -rf /var/lib/apt/lists/*
 echo RUNNERLOOM_GOLDEN_BUILD_COMPLETE
-""".replace('__URL__',url).replace('__DIGEST__',digest).replace('__HARDENING__','\n'.join(hardening))
+""".replace('__URL__',shlex.quote(url)).replace('__DIGEST__',digest).replace('__HARDENING__','\n'.join(hardening))
 config={'growpart':{'mode':'auto','devices':['/'],'ignore_growroot_disabled':False},'resize_rootfs':True,'ssh_pwauth':False,'disable_root':True,'bootcmd':[['systemctl','mask','--now','serial-getty@ttyS0.service'],['systemctl','mask','--now','ssh.service','ssh.socket']],'write_files':[{'path':'/usr/local/sbin/runnerloom-image-build','permissions':'0700','content':script},{'path':'/etc/runnerloom-image-policy.json','permissions':'0644','content':json.dumps(policy,indent=2,sort_keys=True)+'\n'}],'runcmd':[['bash','-c','exec /usr/local/sbin/runnerloom-image-build >/dev/ttyS0 2>&1']]}
 # JSON is valid YAML; the cloud-config header selects cloud-init's parser.
 (p/'build-user-data').write_text('#cloud-config\n'+json.dumps(config))

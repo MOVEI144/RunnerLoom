@@ -6,6 +6,15 @@ import (
 	"testing"
 )
 
+func TestGoldenImageBuilderQuotesRunnerURL(t *testing.T) {
+	if !strings.Contains(imageBuildScript, "shlex.quote(url)") {
+		t.Fatal("builder embeds the runner URL without shell quoting")
+	}
+	if strings.Contains(imageBuildScript, "replace('__URL__',url)") {
+		t.Fatal("unquoted URL substitution remains")
+	}
+}
+
 func TestOfflineImageCleanupShellOptions(t *testing.T) {
 	_, body, ok := strings.Cut(imageBuildScript, "<<'CLEAN'\n")
 	if !ok {

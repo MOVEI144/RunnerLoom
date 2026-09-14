@@ -2,11 +2,11 @@
   "apiVersion": "runnerloom/v1alpha1",
   "name": "home",
   "github": {
-    "url": "https://github.com/MOVEI144",
+    "url": "https://github.com/example-org",
     "runnerGroupID": 1,
     "credentialFile": "/var/lib/runnerloom/controller/github-credentials.json",
     "allowedRepositories": [
-      "MOVEI144/RunnerLoom"
+      "example-org/private-app"
     ]
   },
   "images": [

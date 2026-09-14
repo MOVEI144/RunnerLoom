@@ -223,7 +223,7 @@ func (s *Store) init() error {
 	if e := s.DB.QueryRow("PRAGMA user_version").Scan(&version); e != nil {
 		return e
 	}
-	if version > 1 {
+	if version > 2 {
 		return errors.New("database was created by a newer RunnerLoom")
 	}
 	_, e := s.DB.Exec(`CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL,payload BLOB NOT NULL);
@@ -235,8 +235,20 @@ func (s *Store) init() error {
  CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,event TEXT NOT NULL,target TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS invites(id TEXT PRIMARY KEY,hash TEXT NOT NULL,expires INTEGER NOT NULL,used INTEGER NOT NULL DEFAULT 0,revoked INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS enrollments(id TEXT PRIMARY KEY,invite TEXT NOT NULL UNIQUE,name TEXT NOT NULL,csr BLOB NOT NULL,ceiling BLOB NOT NULL,status TEXT NOT NULL,certificate BLOB);
- CREATE TABLE IF NOT EXISTS identities(name TEXT PRIMARY KEY,certificate_hash TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
- PRAGMA user_version=1;`)
+ CREATE TABLE IF NOT EXISTS identities(name TEXT PRIMARY KEY,certificate_hash TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);`)
+	if e != nil {
+		return e
+	}
+	var hasIntake int
+	if e = s.DB.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('demand') WHERE name='intake'`).Scan(&hasIntake); e != nil {
+		return e
+	}
+	if hasIntake == 0 {
+		if _, e = s.DB.Exec(`ALTER TABLE demand ADD COLUMN intake INTEGER NOT NULL DEFAULT 0`); e != nil {
+			return e
+		}
+	}
+	_, e = s.DB.Exec(`PRAGMA user_version=2`)
 	return e
 }
 func (s *Store) transaction(ctx context.Context, fn func(*sql.Tx) error) error {
@@ -720,13 +732,17 @@ func (s *Store) Sync(ctx context.Context, name string, o Observation) (response 
 		}
 		response.Images = []Image{}
 		imageSeen := map[string]bool{}
+		addImage := func(im Image) {
+			if im.Digest == "" || imageSeen[im.Digest] {
+				return
+			}
+			response.Images = append(response.Images, im)
+			imageSeen[im.Digest] = true
+		}
 		for _, p := range c.Pools {
 			if p.Enabled && c.Eligible(p, n) {
 				im, _ := c.Image(p.Image)
-				if !imageSeen[im.Digest] {
-					response.Images = append(response.Images, im)
-					imageSeen[im.Digest] = true
-				}
+				addImage(im)
 			}
 		}
 		o.Seen = s.Now().UTC()
@@ -746,6 +762,11 @@ func (s *Store) Sync(ctx context.Context, name string, o Observation) (response 
 		runs, e := readInstances(ctx, tx)
 		if e != nil {
 			return e
+		}
+		for _, a := range runs {
+			if a.Node == name && a.State != "Deleted" {
+				addImage(a.Image)
+			}
 		}
 		pending := []pendingCommand{}
 		for _, a := range runs {
@@ -867,7 +888,7 @@ func (s *Store) Nodes(ctx context.Context) (out map[string]Observation, err erro
 	return
 }
 func (s *Store) Demands(ctx context.Context) ([]Demand, error) {
-	rows, e := s.DB.QueryContext(ctx, "SELECT payload,barrier FROM demand ORDER BY pool")
+	rows, e := s.DB.QueryContext(ctx, "SELECT payload,barrier,intake FROM demand ORDER BY pool")
 	if e != nil {
 		return nil, e
 	}
@@ -876,14 +897,14 @@ func (s *Store) Demands(ctx context.Context) ([]Demand, error) {
 	for rows.Next() {
 		var d Demand
 		var b []byte
-		var barrier bool
-		if e = rows.Scan(&b, &barrier); e != nil {
+		var barrier, intake bool
+		if e = rows.Scan(&b, &barrier, &intake); e != nil {
 			return nil, e
 		}
 		if e = json.Unmarshal(b, &d); e != nil {
 			return nil, e
 		}
-		d.Blocked = barrier
+		d.Blocked = barrier || intake
 		out = append(out, d)
 	}
 	return out, rows.Err()
@@ -896,7 +917,7 @@ type RunnerEvent struct {
 }
 
 // PersistMessage commits the statistics and events before the SDK message ACK.
-func (s *Store) PersistMessage(ctx context.Context, session string, id int, pool string, desired int64, events []RunnerEvent) error {
+func (s *Store) PersistMessage(ctx context.Context, session string, id int, pool string, desired int64, events []RunnerEvent, holdIntake bool) error {
 	if desired < 0 || desired > 1000000 || id < 0 {
 		return errors.New("invalid demand")
 	}
@@ -941,7 +962,11 @@ func (s *Store) PersistMessage(ctx context.Context, session string, id int, pool
 		}
 		d := Demand{Pool: pool, Desired: desired, Seen: s.Now().UTC()}
 		b, _ := json.Marshal(d)
-		_, e = tx.ExecContext(ctx, "INSERT INTO demand(pool,payload,barrier) VALUES(?,?,0) ON CONFLICT(pool) DO UPDATE SET payload=excluded.payload,barrier=0", pool, b)
+		intake := 0
+		if holdIntake {
+			intake = 1
+		}
+		_, e = tx.ExecContext(ctx, "INSERT INTO demand(pool,payload,barrier,intake) VALUES(?,?,0,?) ON CONFLICT(pool) DO UPDATE SET payload=excluded.payload,barrier=0,intake=MAX(demand.intake,excluded.intake)", pool, b, intake)
 		if e != nil {
 			return e
 		}

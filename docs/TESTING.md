@@ -50,18 +50,21 @@ runnerloom smoke-vm
 
 ## CI jobs
 
-Product CI is the table below. `.github/workflows/internal-*` files are leftover
-temporary automation and are not pass criteria.
+Product CI is the table below. A GitHub Release is created only by
+`release.yml` after a successful **push** of RunnerLoom CI on `main` (not a
+pull request or `workflow_dispatch`), when the three qualification jobs below
+all succeeded on that same run.
 
 | Workflow | Job | When | Proves | Does not prove |
 |---|---|---|---|---|
-| RunnerLoom CI | Go, race, integration and CLI (`checks`) | Push to `main`, pull requests, manual | Units, concurrency, mTLS integration, fuzz, Debian package, shipped-binary vuln scan | Real KVM, a live GitHub job |
+| RunnerLoom CI | Go, race, integration and CLI (`checks`) | Push to `main`, pull requests, manual | Units, concurrency, mTLS integration, fuzz, Debian package, shipped-binary vuln scan | Real KVM, a live GitHub job; `make check`'s `bash -n` |
 | RunnerLoom CI | Real Ubuntu VM lifecycle | After `checks`, on same-repo PRs and `main` | Signed base, boot, guest work, host-probe rejection, poweroff, owned disk deletion | Official-runner Golden Image, multiple nodes |
 | RunnerLoom CI | Build verified runner image and boot it | After `checks`, on same-repo PRs and `main` | Unregistered Golden Image build, service masks, runner binary, smoke on that image | Home-host capacity or LAN isolation campaigns |
 | RunnerLoom runtime qualification | Build image, enroll Node, run two REAL VMs… | Push to `main` and manual | Two real libvirt VMs, enroll, cleanup | Live GitHub API, a home node |
 | RunnerLoom runtime qualification | Live GitHub prerequisites ONLY | Same as above | Whether dedicated secrets exist | Running a job |
 | RunnerLoom documentation | Reader paths and local links | Documentation changes | Procedure links and headings | Design correctness |
 | RunnerLoom v1 live acceptance | Manual | `workflow_dispatch` | A real job on an allowed private repository | A substitute for CI |
+| Publish verified release | After RunnerLoom CI succeeds on a `main` **push** | Same-repo CI artifact | Tagged GitHub Release of that `VERSION` | PR CI, dispatch re-runs, e2e, live acceptance |
 
 Current CI runners and the qualified product host are Ubuntu 24.04 x86_64.
 macOS and Windows hosts are not qualified yet and may be added later. CI does

@@ -21,6 +21,7 @@ DOCS = (
     ROOT / "docs" / "OPERATIONS.ja.md",
     ROOT / "docs" / "TROUBLESHOOTING.ja.md",
     ROOT / "docs" / "TESTING.md",
+    ROOT / "docs" / "INTERACTIVE_CLI.ja.md",
     ROOT / "CONTRIBUTING.md",
 )
 LINK = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")

@@ -4,7 +4,7 @@ Run each GitHub Actions job in a fresh VM on your own Ubuntu machines.
 
 A single Go binary (CLI, Controller, and Agent) polls GitHub’s official scale-set API over **outbound HTTPS**. There is no inbound webhook. Each job gets a new libvirt VM and a one-job JIT runner; the host confirms stop and ownership before disks are deleted.
 
-**Release:** `0.1.0-rc.4` (candidate). **Host:** Ubuntu 24.04 x86_64, CPU VMs, trusted admin. **Jobs:** only GitHub repositories you list that are **private**. GPU, Windows/macOS hosts, controller HA, and public-repo / public-fork jobs are not qualified in this release (hosts other than Ubuntu may be added later).
+**Release:** `0.1.0-rc.5` (candidate). **Host:** Ubuntu 24.04 x86_64, CPU VMs, trusted admin. **Jobs:** only GitHub repositories you list that are **private**. GPU, Windows/macOS hosts, controller HA, and public-repo / public-fork jobs are not qualified in this release (hosts other than Ubuntu may be added later).
 
 [Releases](https://github.com/MOVEI144/RunnerLoom/releases) · [Docs index](docs/README.md) · [Security](SECURITY.md) · [Verification](docs/VERIFICATION.md)
 
@@ -15,7 +15,7 @@ A single Go binary (CLI, Controller, and Agent) polls GitHub’s official scale-
 自宅や社内の Ubuntu を、GitHub Actions の **Job 専用の使い捨て VM** にするソフトです。
 
 ```text
-Workflow  (runs-on: Poolの名前)
+Workflow  (runs-on: Poolの runnerName)
       │
       │  GitHub が Scale Set に「何台欲しいか」を載せる
       ▼
@@ -43,6 +43,7 @@ jobs:
 | やりたいこと | 読む場所 |
 |---|---|
 | 1台で最初の Job まで | 下の「1台で動かす」→ 全文は [QUICKSTART.ja.md](docs/QUICKSTART.ja.md) |
+| 端末メニューで操作したい | [INTERACTIVE_CLI.ja.md](docs/INTERACTIVE_CLI.ja.md) |
 | CLI の入れ方・更新・削除 | [INSTALL.md](docs/INSTALL.md) |
 | `github check` などが落ちる | [TROUBLESHOOTING.ja.md](docs/TROUBLESHOOTING.ja.md) |
 | 2台目の PC を足す | [MULTI_NODE.ja.md](docs/MULTI_NODE.ja.md) |
@@ -80,8 +81,8 @@ jobs:
 
 | `github.url` | 例 | 追加チェック |
 |---|---|---|
-| Organization | `https://github.com/my-org` | Runner Group の選択リストまで見る |
-| リポジトリ1つ | `https://github.com/my-org/app` | `allowedRepositories` はその1つだけ。Group のリスト照合はしない |
+| Organization | `https://github.com/my-org` | owner が Organization なら Runner Group の Selected / public 禁止 / 選択リスト一致まで見る |
+| リポジトリ1つ | `https://github.com/my-org/app` | `allowedRepositories` はその1つだけ。owner が Organization なら Group 検査は同じ。個人アカウント（`/users` が User）だけ Group を省略 |
 
 Workflow は、許可した **その private リポジトリ** に置き、`runs-on` に Pool の `runnerName` を書きます。ラベルが合っていても、public なら受けません。
 
