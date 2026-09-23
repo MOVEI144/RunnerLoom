@@ -29,3 +29,33 @@ func TestAcceptCommandRejectsOtherNode(t *testing.T) {
 		t.Fatal("foreign node command accepted")
 	}
 }
+
+func TestAcceptCommandTaskMatrix(t *testing.T) {
+	ceiling := core.Resources{CPU: 8, Memory: 16384, Disk: 100}
+	gh := core.Pool{Name: "linux-lite", VCPU: 2, MemoryMiB: 2048, OverheadMiB: 512, RootGiB: 20, DiskOverheadGiB: 2}
+	tp := gh
+	tp.Tasks = true
+	id := core.ID()
+	payload := &core.TaskPayload{ID: id}
+	cases := []struct {
+		name string
+		cmd  core.Command
+		ok   bool
+	}{
+		{"runner ensure", core.Command{Action: "ensure", JIT: "j", Instance: core.Instance{Node: "node-a", Pool: gh}}, true},
+		{"task ensure", core.Command{Action: "ensure", Task: payload, Instance: core.Instance{Node: "node-a", Pool: tp, Task: id}}, true},
+		{"task stop", core.Command{Action: "stop", Instance: core.Instance{Node: "node-a", Pool: tp, Task: id}}, true},
+		{"task payload on stop", core.Command{Action: "stop", Task: payload, Instance: core.Instance{Node: "node-a", Pool: tp, Task: id}}, false},
+		{"payload for another task", core.Command{Action: "ensure", Task: &core.TaskPayload{ID: core.ID()}, Instance: core.Instance{Node: "node-a", Pool: tp, Task: id}}, false},
+		{"payload on a runner instance", core.Command{Action: "ensure", Task: &core.TaskPayload{}, Instance: core.Instance{Node: "node-a", Pool: gh}}, false},
+		{"task instance without payload", core.Command{Action: "ensure", Instance: core.Instance{Node: "node-a", Pool: tp, Task: id}}, false},
+		{"task instance with JIT", core.Command{Action: "ensure", JIT: "j", Task: payload, Instance: core.Instance{Node: "node-a", Pool: tp, Task: id}}, false},
+		{"JIT into a task pool", core.Command{Action: "ensure", JIT: "j", Instance: core.Instance{Node: "node-a", Pool: tp}}, false},
+		{"task link on a GitHub pool", core.Command{Action: "ensure", Task: payload, Instance: core.Instance{Node: "node-a", Pool: gh, Task: id}}, false},
+	}
+	for _, c := range cases {
+		if got := acceptCommand("node-a", ceiling, c.cmd) == nil; got != c.ok {
+			t.Errorf("%s: accepted=%v want %v", c.name, got, c.ok)
+		}
+	}
+}

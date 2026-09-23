@@ -28,6 +28,12 @@ func taskStore(t *testing.T) (*Store, Config) {
 	if _, e = s.Apply(ctx, p.ID); e != nil {
 		t.Fatal(e)
 	}
+	// Task clients exist before they can submit; payload delivery checks it.
+	for _, name := range []string{"laptop", "desktop"} {
+		if _, e = s.DB.Exec("INSERT INTO clients(name,certificate_hash,created) VALUES(?,?,0)", name, "x"); e != nil {
+			t.Fatal(e)
+		}
+	}
 	return s, c
 }
 
@@ -287,6 +293,9 @@ func TestClientIdentityIsSeparateFromNodes(t *testing.T) {
 	}
 	_, csr, e := NewKeyCSR()
 	if e != nil {
+		t.Fatal(e)
+	}
+	if _, e = s.DB.Exec("DELETE FROM clients WHERE name='laptop'"); e != nil {
 		t.Fatal(e)
 	}
 	cert, cluster, e := s.ApproveClient(ctx, ca, "laptop", csr, false)

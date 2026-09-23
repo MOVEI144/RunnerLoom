@@ -29,6 +29,26 @@ type Service struct {
 	Profiles map[string]Profile
 	Home     string
 	Getenv   func(string) string
+	// Live re-reads client.json and agents.json on every call, so that a
+	// `client disallow` applies to an MCP server that is already running.
+	Live bool
+}
+
+func (s *Service) refresh() error {
+	if !s.Live {
+		return nil
+	}
+	c, e := LoadConfig(s.Dir)
+	if e != nil {
+		return e
+	}
+	profiles, e := LoadProfiles(s.Dir)
+	if e != nil {
+		return e
+	}
+	s.Config.Allow, s.Config.Pinned, s.Config.DefaultPool, s.Config.DefaultAgent = c.Allow, c.Pinned, c.DefaultPool, c.DefaultAgent
+	s.Profiles = profiles
+	return nil
 }
 
 // NewService opens the client in dir with the real environment.
@@ -43,7 +63,7 @@ func NewService(dir string) (*Service, error) {
 		return nil, e
 	}
 	home, _ := os.UserHomeDir()
-	return &Service{Dir: dir, Config: cl.Config, API: cl, Profiles: profiles, Home: home, Getenv: os.Getenv}, nil
+	return &Service{Dir: dir, Config: cl.Config, API: cl, Profiles: profiles, Home: home, Getenv: os.Getenv, Live: true}, nil
 }
 
 type StartRequest struct {
@@ -68,9 +88,20 @@ type AgentInfo struct {
 	Problem     string      `json:"problem,omitempty"`
 }
 
-func (s *Service) allowed(name string) bool { return core.Contains(s.Config.Allow, name) }
+// allowed requires the name in the allow list and, for a profile that is not
+// built in, the exact definition the user allowed.
+func (s *Service) allowed(name string) bool {
+	if !core.Contains(s.Config.Allow, name) {
+		return false
+	}
+	p, ok := s.Profiles[name]
+	return !ok || p.Builtin || s.Config.Pinned[name] == p.Digest()
+}
 
 func (s *Service) Agents(context.Context) ([]AgentInfo, error) {
+	if e := s.refresh(); e != nil {
+		return nil, e
+	}
 	out := []AgentInfo{}
 	for _, p := range SortedProfiles(s.Profiles) {
 		info := AgentInfo{Name: p.Name, Description: p.Description, Builtin: p.Builtin, Allowed: s.allowed(p.Name)}
@@ -110,6 +141,9 @@ func NormalizeRepository(r string) string {
 
 // Start validates locally, collects only the allowed credentials, and submits.
 func (s *Service) Start(ctx context.Context, r StartRequest) (core.Task, error) {
+	if e := s.refresh(); e != nil {
+		return core.Task{}, e
+	}
 	if r.ContinueFrom != "" {
 		prev, e := s.API.Task(ctx, r.ContinueFrom)
 		if e != nil {
@@ -142,6 +176,9 @@ func (s *Service) Start(ctx context.Context, r StartRequest) (core.Task, error) 
 		return core.Task{}, core.Fail("UNKNOWN_AGENT", "未定義のエージェントです。runnerloom_list_agents で確認してください", r.Agent)
 	}
 	if !s.allowed(p.Name) {
+		if core.Contains(s.Config.Allow, p.Name) {
+			return core.Task{}, core.Fail("AGENT_CHANGED", "agents.jsonの定義が許可後に変わりました。内容を確認して runnerloom client allow "+p.Name+" をやり直してください", p.Name)
+		}
 		return core.Task{}, core.Fail("AGENT_NOT_ALLOWED", "このエージェントの認証情報送信は許可されていません。PCの利用者が runnerloom client allow "+p.Name+" を実行してください", p.Name)
 	}
 	if r.Pool == "" {
@@ -165,7 +202,8 @@ func (s *Service) Start(ctx context.Context, r StartRequest) (core.Task, error) 
 		if spec.Branch == "" {
 			spec.Branch = "runnerloom/" + time.Now().UTC().Format("20060102-150405") + "-" + core.ID()[:6]
 		}
-		if s.allowed(GitHubCredential) {
+		// The token goes only to github.com; other hosts are cloned without it.
+		if _, onGitHub := core.RepositoryPath(spec.Repository); onGitHub && core.Contains(s.Config.Allow, GitHubCredential) {
 			token, e := GitHubToken(s.Dir, s.Getenv)
 			if e != nil {
 				return core.Task{}, e
@@ -205,28 +243,47 @@ func (s *Service) Wait(ctx context.Context, id string, budget time.Duration) (co
 	}
 }
 
-// SetAllow adds or removes names from the allow list.
+// SetAllow adds or removes names from the allow list. Names must be known
+// agents (or "github"); a non-built-in profile is pinned to its digest.
 func SetAllow(dir string, names []string, allow bool) (ClientConfig, error) {
 	c, e := LoadConfig(dir)
 	if e != nil {
 		return c, e
 	}
+	profiles, e := LoadProfiles(dir)
+	if e != nil {
+		return c, e
+	}
+	if c.Pinned == nil {
+		c.Pinned = map[string]string{}
+	}
 	for _, n := range names {
-		if n != GitHubCredential && !core.ValidName(n) {
-			return c, core.Fail("CLIENT_INPUT", "エージェント名が不正です", n)
+		p, known := profiles[n]
+		if allow && n != GitHubCredential && !known {
+			return c, core.Fail("UNKNOWN_AGENT", "未定義のエージェントです。組み込みか agents.json の名前を指定してください", n)
 		}
-		if allow && !core.Contains(c.Allow, n) {
-			c.Allow = append(c.Allow, n)
-		}
-		if !allow {
-			kept := []string{}
-			for _, v := range c.Allow {
-				if v != n {
-					kept = append(kept, v)
-				}
+		if allow {
+			if !core.Contains(c.Allow, n) {
+				c.Allow = append(c.Allow, n)
 			}
-			c.Allow = kept
+			if known && !p.Builtin {
+				c.Pinned[n] = p.Digest()
+			} else {
+				delete(c.Pinned, n)
+			}
+			continue
 		}
+		kept := []string{}
+		for _, v := range c.Allow {
+			if v != n {
+				kept = append(kept, v)
+			}
+		}
+		c.Allow = kept
+		delete(c.Pinned, n)
+	}
+	if len(c.Pinned) == 0 {
+		c.Pinned = nil
 	}
 	return c, SaveConfig(dir, c)
 }

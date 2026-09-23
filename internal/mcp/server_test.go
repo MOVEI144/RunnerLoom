@@ -195,3 +195,19 @@ func TestHTTPTransportAuthenticationAndShape(t *testing.T) {
 		t.Fatalf("discovery probe must be a clean 404: %d", w.Code)
 	}
 }
+
+func TestJSONRPCEdgeCases(t *testing.T) {
+	s := NewRunnerLoom(&fakeBackend{}, "test")
+	var v map[string]any
+	_ = json.Unmarshal(s.Handle(context.Background(), []byte(`[{"jsonrpc":"2.0","id":1,"method":"ping"}]`)), &v)
+	if v["error"].(map[string]any)["code"].(float64) != -32600 {
+		t.Fatal("batch not rejected as an invalid request")
+	}
+	_ = json.Unmarshal(s.Handle(context.Background(), []byte(`{"id":7,"method":"ping"}`)), &v)
+	if v["error"].(map[string]any)["code"].(float64) != -32600 || v["id"].(float64) != 7 {
+		t.Fatalf("missing jsonrpc version: %v", v)
+	}
+	if s.Handle(context.Background(), []byte(`{"jsonrpc":"2.0","id":3,"result":{}}`)) != nil {
+		t.Fatal("client response answered")
+	}
+}

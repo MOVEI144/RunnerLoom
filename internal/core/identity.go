@@ -420,7 +420,9 @@ func (s *Store) Approve(ctx context.Context, id string, ca CA) (out Enrollment, 
 		} else {
 			n = Node{Name: out.Name, Budget: out.Ceiling, LocalCeiling: out.Ceiling, AllowedPools: []string{}}
 			for _, p := range c.Pools {
-				if p.Charge().Fits(out.Ceiling) {
+				// Task Pools carry user credentials: an administrator opts
+				// each Node in explicitly.
+				if p.Charge().Fits(out.Ceiling) && !p.Tasks {
 					n.AllowedPools = append(n.AllowedPools, p.Name)
 				}
 			}

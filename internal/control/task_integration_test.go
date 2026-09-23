@@ -98,7 +98,14 @@ func (l *lab) taskClient(t *testing.T, name string) string {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if _, e = tasks.Install(dir, tasks.Bundle{Name: name, Cluster: cluster, Controller: l.http.URL, CA: l.ca.PEM, Fingerprint: core.Hash(l.ca.Certificate.Raw), Certificate: cert}); e != nil {
+	bundle := tasks.Bundle{Name: name, Cluster: cluster, Controller: l.http.URL, CA: l.ca.PEM, Fingerprint: core.Hash(l.ca.Certificate.Raw), Certificate: cert}
+	other, _ := core.InitCA(filepath.Join(l.dir, "forged-ca-"+name), "home")
+	forged := bundle
+	forged.CA, forged.Fingerprint = other.PEM, core.Hash(other.Certificate.Raw)
+	if _, e = tasks.Install(dir, forged, core.Hash(l.ca.Certificate.Raw), false); e == nil {
+		t.Fatal("a bundle signed by another CA was installed")
+	}
+	if _, e = tasks.Install(dir, bundle, "sha256:"+core.Hash(l.ca.Certificate.Raw), false); e != nil {
 		t.Fatal(e)
 	}
 	b, _ := os.ReadFile(filepath.Join(dir, "client-key.pem"))
@@ -125,25 +132,27 @@ func TestAgentTaskOverMutualTLS(t *testing.T) {
 	if e := os.WriteFile(filepath.Join(home, ".fake", "auth.json"), []byte("LOCAL-AGENT-SECRET"), 0600); e != nil {
 		t.Fatal(e)
 	}
+	if e := os.WriteFile(filepath.Join(dir, "agents.json"), []byte(`{"agents":[{"name":"fake","run":["fake","{prompt}"],"files":[{"path":".fake/auth.json"}]}]}`), 0600); e != nil {
+		t.Fatal(e)
+	}
 	svc, e := tasks.NewService(dir)
 	if e != nil {
 		t.Fatal(e)
 	}
 	svc.Home = home
 	svc.Getenv = func(k string) string { return map[string]string{"GH_TOKEN": "LOCAL-GH-TOKEN"}[k] }
-	svc.Profiles = map[string]tasks.Profile{"fake": {Name: "fake", Run: []string{"fake", "{prompt}"}, Files: []tasks.FileSpec{{Path: ".fake/auth.json"}}}}
 	ctx := context.Background()
 	req := tasks.StartRequest{Agent: "fake", Prompt: "long refactor", Repository: "example-org/private-app", PullRequest: true}
 	if _, e = svc.Start(ctx, req); e == nil || !strings.Contains(e.Error(), "AGENT_NOT_ALLOWED") {
 		t.Fatalf("credentials left the PC without an explicit allow: %v", e)
 	}
-	if svc.Config, e = tasks.SetAllow(dir, []string{"fake"}, true); e != nil {
+	if _, e = tasks.SetAllow(dir, []string{"fake"}, true); e != nil {
 		t.Fatal(e)
 	}
 	if _, e = svc.Start(ctx, req); e == nil || !strings.Contains(e.Error(), "GITHUB_TOKEN_REQUIRED") {
 		t.Fatalf("GitHub token sent without allow github: %v", e)
 	}
-	if svc.Config, e = tasks.SetAllow(dir, []string{"github"}, true); e != nil {
+	if _, e = tasks.SetAllow(dir, []string{"github"}, true); e != nil {
 		t.Fatal(e)
 	}
 	task, e := svc.Start(ctx, req)

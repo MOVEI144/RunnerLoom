@@ -236,7 +236,7 @@ func (s *Store) init() error {
  CREATE TABLE IF NOT EXISTS invites(id TEXT PRIMARY KEY,hash TEXT NOT NULL,expires INTEGER NOT NULL,used INTEGER NOT NULL DEFAULT 0,revoked INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS enrollments(id TEXT PRIMARY KEY,invite TEXT NOT NULL UNIQUE,name TEXT NOT NULL,csr BLOB NOT NULL,ceiling BLOB NOT NULL,status TEXT NOT NULL,certificate BLOB);
  CREATE TABLE IF NOT EXISTS identities(name TEXT PRIMARY KEY,certificate_hash TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
- CREATE TABLE IF NOT EXISTS clients(name TEXT PRIMARY KEY,certificate_hash TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS clients(name TEXT PRIMARY KEY,certificate_hash TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL,previous_hash TEXT NOT NULL DEFAULT '',previous_until INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,client TEXT NOT NULL,request TEXT NOT NULL,created INTEGER NOT NULL,payload BLOB NOT NULL,secret BLOB,result BLOB,progress BLOB,UNIQUE(client,request));`)
 	if e != nil {
 		return e
@@ -247,6 +247,15 @@ func (s *Store) init() error {
 	}
 	if hasIntake == 0 {
 		if _, e = s.DB.Exec(`ALTER TABLE demand ADD COLUMN intake INTEGER NOT NULL DEFAULT 0`); e != nil {
+			return e
+		}
+	}
+	var hasGrace int
+	if e = s.DB.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('clients') WHERE name='previous_hash'`).Scan(&hasGrace); e != nil {
+		return e
+	}
+	if hasGrace == 0 {
+		if _, e = s.DB.Exec(`ALTER TABLE clients ADD COLUMN previous_hash TEXT NOT NULL DEFAULT ''; ALTER TABLE clients ADD COLUMN previous_until INTEGER NOT NULL DEFAULT 0`); e != nil {
 			return e
 		}
 	}
@@ -426,7 +435,7 @@ func checkCapacityUpdate(c Config, runs []Instance) error {
 				if !a.Held.Empty() {
 					p, ok := c.Pool(a.Pool.Name)
 					im, _ := c.Image(p.Image)
-					if !ok || p.Charge() != a.Pool.Charge() || im.Digest != a.Image.Digest {
+					if !ok || p.Charge() != a.Pool.Charge() || im.Digest != a.Image.Digest || p.Tasks != a.Pool.Tasks {
 						return Fail("POOL_IN_USE", "使用中Poolのサイズ・イメージを変更できません", a.Pool.Name)
 					}
 				}
@@ -778,7 +787,8 @@ func (s *Store) Sync(ctx context.Context, name string, o Observation) (response 
 						a.State = "Idle"
 					}
 				case "Stopped":
-					if a.Result == "" && a.Held.CPU > 0 {
+					// Task VMs have no GitHub demand to fence.
+					if a.Result == "" && a.Held.CPU > 0 && a.Task == "" {
 						if _, e = tx.ExecContext(ctx, "UPDATE demand SET barrier=1 WHERE pool=?", a.Pool.Name); e != nil {
 							return e
 						}

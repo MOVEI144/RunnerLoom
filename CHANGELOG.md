@@ -1,11 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.1.0-rc.6
 
-- Add agent tasks: approved task clients submit long-running coding tasks that run one agent CLI (claude, codex, opencode, pi, gemini, or profiles in `agents.json`) in a disposable VM on Pools marked `tasks: true`. Results come back as a pushed work branch, an optional draft PR, or a patch.
-- Add task-client identities (`client init/approve/install/allow/revoke`), with keys generated on the PC and a certificate URI kind separate from Nodes.
+Sixth Linux/amd64 CPU/LAN release candidate. Adds agent tasks: a self-hosted "cloud agent" that runs long coding tasks from Claude Code, Codex or ChatGPT in disposable VMs.
+
+- Add agent tasks: approved task clients submit long-running coding tasks that run one agent CLI in a disposable VM on Pools marked `tasks: true`. Built-in profiles cover claude, codex, opencode, pi, gemini, grok (Grok Build), musecode and agy (Antigravity); others can be added in `agents.json`. Results come back as a pushed work branch, an optional draft PR, or a patch.
+- Add task-client identities (`client init/approve/install/allow/revoke`), with keys generated on the PC, a certificate URI kind separate from Nodes, CSR and CA fingerprint checks during enrollment, and automatic certificate renewal with a 7-day overlap.
 - Add `runnerloom mcp serve` (stdio and loopback-only Streamable HTTP) for Claude Code, Codex, the ChatGPT desktop app and ChatGPT web through a tunnel. Add a Claude Code plugin and marketplace.
-- Encrypt task payloads at rest and erase them after confirmed deletion, queue expiry or early cancellation. Accept guest results only from the owning Node after host-confirmed shutdown.
+- Run the agent as the unprivileged runner user without sudo by default. Keep the GitHub token out of every agent-owned process: commit as the runner without secrets, kill the runner's processes, and push as root from a separate clean repository. The token is sent only for github.com repositories.
+- Never read well-known secret locations as agent credentials, and pin allowed custom profiles by digest (`AGENT_CHANGED`).
+- Encrypt task payloads and results at rest; erase payloads after confirmed deletion, queue expiry, early cancellation or client revocation. Accept guest results only from the owning Node after host-confirmed shutdown, and only for the task's own branch and repository.
+- Revoking a client cancels its unfinished tasks and stops placed VMs. Cancelling never relabels a task that already has a result.
+- Place queued tasks first-in first-out per Pool, refuse to start a task VM with under 10 minutes left, and require task Pools to allow at least 30 minutes.
+- Allow a tasks-only cluster without a `github` section; the GitHub manager starts only when a GitHub Pool exists.
+- Add `smoke-vm --task`, which runs the real guest runner in a real VM, and run it in CI.
+- Publish macOS (arm64 and amd64) task-client archives. Windows clients are not provided.
 - Database schema version 3, which adds the `clients` and `tasks` tables. Older binaries refuse this database.
 
 ## 0.1.0-rc.5

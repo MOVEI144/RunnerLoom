@@ -1,6 +1,6 @@
 {
   "name": "runnerloom",
-  "version": "0.1.0-rc.5",
+  "version": "0.1.0-rc.6",
   "description": "Delegate long-running coding tasks to agents in disposable RunnerLoom VMs on your own machines. Requires the runnerloom CLI on PATH and a registered task client (runnerloom client init/install/allow).",
   "author": {
     "name": "MOVEI144"

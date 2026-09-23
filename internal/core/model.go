@@ -126,6 +126,20 @@ type Config struct {
 	Reservations []Reservation `json:"reservations"`
 }
 
+// UsesGitHub reports whether any Pool is a GitHub scale-set Pool or a github
+// block was given. Only then is the github block required and validated.
+func (c Config) UsesGitHub() bool {
+	if c.GitHub.URL != "" || c.GitHub.RunnerGroupID != 0 || c.GitHub.CredentialFile != "" || len(c.GitHub.AllowedRepositories) > 0 {
+		return true
+	}
+	for _, p := range c.Pools {
+		if !p.Tasks {
+			return true
+		}
+	}
+	return false
+}
+
 func (c Config) Pool(s string) (Pool, bool) {
 	for _, p := range c.Pools {
 		if p.Name == s {
@@ -179,24 +193,27 @@ func (c Config) Validate() error {
 	}
 	check(c.APIVersion == Version, "apiVersion", "対応しない設定版です")
 	check(ValidName(c.Name), "name", "Cluster名は英小文字・数字・ハイフンで指定してください")
-	u, e := url.Parse(c.GitHub.URL)
-	parts := []string{}
-	if e == nil {
-		parts = strings.Split(strings.Trim(u.Path, "/"), "/")
-	}
-	check(e == nil && u != nil && u.Scheme == "https" && u.Host == "github.com" && u.User == nil && u.RawQuery == "" && u.Fragment == "" && len(parts) >= 1 && len(parts) <= 2 && parts[0] != "", "github.url", "https://github.com/組織 または /所有者/repo を指定してください")
-	check(c.GitHub.RunnerGroupID > 0, "github.runnerGroupID", "明示的なRunner Group IDが必要です")
-	check(filepath.IsAbs(c.GitHub.CredentialFile) && filepath.Clean(c.GitHub.CredentialFile) == c.GitHub.CredentialFile, "github.credentialFile", "認証情報は絶対パスの別ファイルで指定してください")
-	check(len(c.GitHub.AllowedRepositories) > 0, "github.allowedRepositories", "許可Repositoryを指定してください")
-	repoSeen := map[string]bool{}
-	for _, r := range c.GitHub.AllowedRepositories {
-		rp := strings.Split(r, "/")
-		ok := len(rp) == 2 && rp[0] != "" && rp[1] != "" && !strings.ContainsAny(r, " \\\t\r\n") && len(parts) > 0 && strings.EqualFold(rp[0], parts[0])
-		if len(parts) == 2 {
-			ok = ok && strings.EqualFold(r, strings.Join(parts, "/"))
+	// A cluster that only serves agent tasks may omit the github block.
+	if c.UsesGitHub() {
+		u, e := url.Parse(c.GitHub.URL)
+		parts := []string{}
+		if e == nil {
+			parts = strings.Split(strings.Trim(u.Path, "/"), "/")
 		}
-		check(ok && !repoSeen[strings.ToLower(r)], "github.allowedRepositories."+r, "対象外または重複したRepositoryです")
-		repoSeen[strings.ToLower(r)] = true
+		check(e == nil && u != nil && u.Scheme == "https" && u.Host == "github.com" && u.User == nil && u.RawQuery == "" && u.Fragment == "" && len(parts) >= 1 && len(parts) <= 2 && parts[0] != "", "github.url", "https://github.com/組織 または /所有者/repo を指定してください")
+		check(c.GitHub.RunnerGroupID > 0, "github.runnerGroupID", "明示的なRunner Group IDが必要です")
+		check(filepath.IsAbs(c.GitHub.CredentialFile) && filepath.Clean(c.GitHub.CredentialFile) == c.GitHub.CredentialFile, "github.credentialFile", "認証情報は絶対パスの別ファイルで指定してください")
+		check(len(c.GitHub.AllowedRepositories) > 0, "github.allowedRepositories", "許可Repositoryを指定してください")
+		repoSeen := map[string]bool{}
+		for _, r := range c.GitHub.AllowedRepositories {
+			rp := strings.Split(r, "/")
+			ok := len(rp) == 2 && rp[0] != "" && rp[1] != "" && !strings.ContainsAny(r, " \\\t\r\n") && len(parts) > 0 && strings.EqualFold(rp[0], parts[0])
+			if len(parts) == 2 {
+				ok = ok && strings.EqualFold(r, strings.Join(parts, "/"))
+			}
+			check(ok && !repoSeen[strings.ToLower(r)], "github.allowedRepositories."+r, "対象外または重複したRepositoryです")
+			repoSeen[strings.ToLower(r)] = true
+		}
 	}
 	if len(c.Nodes) > 1024 || len(c.Pools) > 1024 || len(c.Images) > 1024 || len(c.Reservations) > 4096 {
 		return Fail("CONFIG_LIMIT", "設定数が上限を超えています", nil)
@@ -226,6 +243,9 @@ func (c Config) Validate() error {
 		if p.Tasks {
 			check(p.RunnerName == "" || ValidName(p.RunnerName) && !runnerNames[p.RunnerName], key+".runnerName", "不正または重複したGitHub選択名です")
 			check(p.WarmIdle == 0, key+".warmIdle", "タスク用Poolは待機VMを持てません")
+			// The host refuses to start a task with under 10 minutes left, and
+			// the guest keeps a further 7 minutes for commit, push and result.
+			check(p.ExecutionMinutes >= 30, key+".executionMinutes", "タスク用Poolの実行時間は30分以上にしてください")
 		} else {
 			check(ValidName(p.RunnerName) && !runnerNames[p.RunnerName], key+".runnerName", "不正または重複したGitHub選択名です")
 		}

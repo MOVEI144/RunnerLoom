@@ -53,7 +53,7 @@ jobs:
           import hashlib,json,os,pathlib,re
           root=pathlib.Path('dist');version=pathlib.Path('VERSION').read_text().strip()
           assert re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-[a-z0-9]+(?:\.[a-z0-9]+)*)?',version)
-          names={f'runnerloom-{version}-linux-amd64.tar.gz',f'runnerloom_{version.replace("-","~",1)}_amd64.deb',f'runnerloom-{version}-buildinfo.json'}
+          names={f'runnerloom-{version}-linux-amd64.tar.gz',f'runnerloom-{version}-darwin-arm64.tar.gz',f'runnerloom-{version}-darwin-amd64.tar.gz',f'runnerloom_{version.replace("-","~",1)}_amd64.deb',f'runnerloom-{version}-buildinfo.json'}
           assert {p.name for p in root.iterdir()}==names|{'SHA256SUMS'}
           info=json.loads((root/f'runnerloom-{version}-buildinfo.json').read_text())
           assert info['sourceCommit']==os.environ['SOURCE_SHA'] and info['version']==version
@@ -67,12 +67,12 @@ jobs:
           pathlib.Path(os.environ['RUNNER_TEMP'],'release-version').write_text(version)
           notes=f'''## RunnerLoom {version}
 
-          Linux/amd64 CPU/LAN release candidate. Includes versioned archive, Debian package, build information and SHA-256 checksums.
+          Linux/amd64 CPU/LAN release candidate. Includes the versioned Linux archive and Debian package, macOS (arm64/amd64) task-client archives for the agent-task MCP server, build information and SHA-256 checksums.
 
           Source: `{os.environ['SOURCE_SHA']}`
           Qualification: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['SOURCE_RUN']}
 
-          Qualification includes race/integration tests, package extraction tests, a shipped-binary vulnerability scan, an actual Ubuntu VM lifecycle, and building and booting an unregistered official-Runner image.
+          Qualification includes race/integration tests, package extraction tests, a shipped-binary vulnerability scan, an actual Ubuntu VM lifecycle, an agent-task run of the real guest runner in an actual VM, and building and booting an unregistered official-Runner image.
 
           Installation does not enable services or alter host networking. See docs/INSTALL.md and docs/QUICKSTART.ja.md.
 

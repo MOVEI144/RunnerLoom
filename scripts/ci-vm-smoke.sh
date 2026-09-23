@@ -58,6 +58,18 @@ r=json.load(open(sys.argv[1]))
 assert r['ok'] and r['data']['realVM'] and r['data']['deleted'],r
 print('Verified actual VM boot, guest execution, poweroff and deletion; emulator='+r['data']['emulator'])
 PY
+# The same image runs the real agent-task guest runner with a fixed shell
+# agent: user switch without sudo, secret isolation, clone of a public
+# repository, a failed push with an invalid token, and a patch in the result.
+sudo ./dist/runnerloom smoke-vm --task --config "$STATE/agent.json" --image "$IMAGE" --digest "sha256:$SHA" --timeout 15m "${MODE[@]}" --json > "$EVIDENCE/vm-task-smoke.json"
+python3 - "$EVIDENCE/vm-task-smoke.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1]))
+d=r['data']
+assert r['ok'] and d['realVM'] and d['task'] and d['deleted'],r
+assert d['result']['status']=='succeeded' and d['result']['changed'] and not d['result']['pushed'],d
+print('Verified agent-task guest runner in a real VM; emulator='+d['emulator'])
+PY
 if sudo virsh -c qemu:///system list --all --name | grep -E '^rl-[0-9a-f]{32}$'; then
   echo 'RunnerLoom left a VM registered after the smoke test' >&2
   exit 1

@@ -4,7 +4,7 @@ Run each GitHub Actions job in a fresh VM on your own Ubuntu machines.
 
 A single Go binary (CLI, Controller, and Agent) polls GitHub’s official scale-set API over **outbound HTTPS**. There is no inbound webhook. Each job gets a new libvirt VM and a one-job JIT runner; the host confirms stop and ownership before disks are deleted.
 
-**Release:** `0.1.0-rc.5` (candidate). **Host:** Ubuntu 24.04 x86_64, CPU VMs, trusted admin. **Jobs:** only GitHub repositories you list that are **private**. GPU, Windows/macOS hosts, controller HA, and public-repo / public-fork jobs are not qualified in this release (hosts other than Ubuntu may be added later).
+**Release:** `0.1.0-rc.6` (candidate). **Host:** Ubuntu 24.04 x86_64, CPU VMs, trusted admin. **Jobs:** only GitHub repositories you list that are **private**. GPU, Windows/macOS hosts, controller HA, and public-repo / public-fork jobs are not qualified in this release (hosts other than Ubuntu may be added later).
 
 [Releases](https://github.com/MOVEI144/RunnerLoom/releases) · [Docs index](docs/README.md) · [Security](SECURITY.md) · [Verification](docs/VERIFICATION.md)
 
@@ -29,7 +29,7 @@ Workflow  (runs-on: Poolの runnerName)
 - Workflow は CPU 数を書きません。管理者が決めた Pool を `runs-on` で選びます。
 - GitHub 上で Job が success でも、VM の CPU / RAM / ディスクは **ホストが消したと確認するまで** 返しません。
 - CLI を入れただけでは、service は起動せず、ネットワークも変わりません。
-- 同じ VM の仕組みで、MCP・Claude Code プラグインから **コーディングエージェントのタスク** も実行できます（codex / claude / opencode / pi / gemini など。PC のログイン情報を持ち込み、結果はブランチ・draft PR で返る）。[AGENT_TASKS.ja.md](docs/AGENT_TASKS.ja.md)
+- 同じ VM の仕組みで、MCP・Claude Code プラグインから **コーディングエージェントのタスク** も実行できます（codex / claude / opencode / pi / gemini / grok / musecode / agy など。PC のログイン情報を持ち込み、結果はブランチ・draft PR で返る）。[AGENT_TASKS.ja.md](docs/AGENT_TASKS.ja.md)
 
 ```yaml
 jobs:

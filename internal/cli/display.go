@@ -23,7 +23,46 @@ func humanOutput(w io.Writer, v any) (bool, error) {
 		}
 		fmt.Fprintln(t, strings.Join(parts, "\t"))
 	}
+	section := func(title, body string) {
+		if body == "" {
+			return
+		}
+		fmt.Fprintf(t, "--- %s\n%s\n", title, terminalSafeLog([]byte(strings.TrimRight(body, "\n"))))
+	}
 	switch rows := v.(type) {
+	case []core.Task:
+		line("TASK ID", "状態", "AGENT", "POOL", "BRANCH", "作成", "内容")
+		for _, r := range rows {
+			line(r.ID, r.State, r.Agent, r.Pool, r.Branch, r.Created.Local().Format(time.RFC3339), r.Title)
+		}
+		if len(rows) == 0 {
+			line("タスクはまだありません。")
+		}
+	case core.Task:
+		// Everything below except IDs comes from users or the untrusted guest;
+		// line() and section() escape control and bidi characters.
+		line("TASK", rows.ID, "状態", rows.State)
+		line("AGENT", rows.Agent, "POOL", rows.Pool)
+		line("REPOSITORY", rows.Repository, "BRANCH", rows.Branch)
+		line("内容", rows.Title)
+		if rows.Result != nil {
+			r := rows.Result
+			line("結果", r.Status, "終了コード", r.ExitCode)
+			line("COMMIT", r.Commit, "PUSH済み", r.Pushed)
+			line("PR", r.PullRequestURL)
+			if r.Error != "" {
+				line("エラー", r.Error)
+			}
+		}
+		if err := t.Flush(); err != nil {
+			return true, err
+		}
+		section("途中経過", rows.Progress)
+		if rows.Result != nil {
+			section("変更", rows.Result.DiffStat)
+			section("エージェントの出力", rows.Result.Output)
+			section("patch", rows.Result.Patch)
+		}
 	case []core.Check:
 		line("項目", "状態", "説明")
 		for _, r := range rows {

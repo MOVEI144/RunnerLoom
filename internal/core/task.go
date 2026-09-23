@@ -42,6 +42,9 @@ type AgentProfile struct {
 	Runtime string   `json:"runtime,omitempty"`
 	Install string   `json:"install,omitempty"`
 	Run     []string `json:"run"`
+	// Sudo gives the agent user passwordless sudo in the guest. The agent can
+	// then read every secret of the task, including the GitHub token.
+	Sudo bool `json:"sudo,omitempty"`
 }
 
 // TaskFile is placed at the same path relative to the guest runner's home.
@@ -231,6 +234,12 @@ func (t TaskSpec) Validate() error {
 		}
 	}
 	check(len(t.GitToken) <= 1024 && !strings.ContainsFunc(t.GitToken, func(r rune) bool { return r <= ' ' || r > '~' }), "gitToken", "GitHubトークンの形式が不正です")
+	if t.GitToken != "" {
+		// The guest credential helper answers only this host; refusing other
+		// hosts here keeps a caller from sending the token anywhere else.
+		_, onGitHub := RepositoryPath(t.Repository)
+		check(onGitHub, "gitToken", "GitHubトークンは github.com のRepositoryにだけ送れます")
+	}
 	check(len(t.Files) <= 32, "files", "認証ファイルは32個までです")
 	total := 0
 	seen := map[string]bool{}
@@ -434,11 +443,20 @@ func (s *Store) SubmitTask(ctx context.Context, client string, spec TaskSpec) (T
 		if _, e = tx.ExecContext(ctx, "INSERT INTO audit(at,event,target) VALUES(?,?,?)", now.Unix(), "task.submit", client+"/"+t.ID); e != nil {
 			return e
 		}
+		id = t.ID
+		queued, e := queuedTasks(ctx, tx)
+		if e != nil {
+			return e
+		}
+		for _, older := range queued {
+			if older.Pool == t.Pool && older.ID != t.ID {
+				return nil // wait behind older tasks of this Pool
+			}
+		}
 		runs, e := readInstances(ctx, tx)
 		if e != nil {
 			return e
 		}
-		id = t.ID
 		_, e = s.dispatchTx(ctx, tx, c, runs, &t)
 		return e
 	})
@@ -448,41 +466,54 @@ func (s *Store) SubmitTask(ctx context.Context, client string, spec TaskSpec) (T
 	return s.Task(ctx, client, id, false)
 }
 
-// DispatchTasks places queued tasks in submission order and expires ones that
-// waited longer than TaskQueueLifetime. It returns how many were placed.
+// queuedTasks returns unplaced, live tasks in submission order.
+func queuedTasks(ctx context.Context, q queryReader) ([]Task, error) {
+	rows, e := q.QueryContext(ctx, "SELECT payload FROM tasks WHERE secret IS NOT NULL ORDER BY created,id")
+	if e != nil {
+		return nil, e
+	}
+	defer rows.Close()
+	queued := []Task{}
+	for rows.Next() {
+		var b []byte
+		var t Task
+		if e = rows.Scan(&b); e == nil {
+			e = json.Unmarshal(b, &t)
+		}
+		if e != nil {
+			return nil, e
+		}
+		if t.Instance == "" && !t.Cancelled && !t.Expired {
+			queued = append(queued, t)
+		}
+	}
+	return queued, rows.Err()
+}
+
+// DispatchTasks places queued tasks first-in first-out per Pool and expires
+// ones that waited longer than TaskQueueLifetime. When the oldest task of a
+// Pool cannot be placed, younger tasks of that Pool wait behind it.
 func (s *Store) DispatchTasks(ctx context.Context) (placed int, err error) {
+	// A read-only look first: GitHub-only installations never take the
+	// writer lock for tasks.
+	pending, err := queuedTasks(ctx, s.DB)
+	if err != nil || len(pending) == 0 {
+		return 0, err
+	}
 	err = s.transaction(ctx, func(tx *sql.Tx) error {
 		c, rev, e := readConfig(ctx, tx)
 		if e != nil || rev == 0 {
 			return e
 		}
-		rows, e := tx.QueryContext(ctx, "SELECT payload FROM tasks WHERE secret IS NOT NULL ORDER BY created,id")
+		queued, e := queuedTasks(ctx, tx)
 		if e != nil {
-			return e
-		}
-		queued := []Task{}
-		for rows.Next() {
-			var b []byte
-			var t Task
-			if e = rows.Scan(&b); e == nil {
-				e = json.Unmarshal(b, &t)
-			}
-			if e != nil {
-				rows.Close()
-				return e
-			}
-			if t.Instance == "" && !t.Cancelled && !t.Expired {
-				queued = append(queued, t)
-			}
-		}
-		rows.Close()
-		if e = rows.Err(); e != nil {
 			return e
 		}
 		runs, e := readInstances(ctx, tx)
 		if e != nil {
 			return e
 		}
+		blocked := map[string]bool{}
 		for i := range queued {
 			t := &queued[i]
 			if s.Now().Sub(t.Created) > TaskQueueLifetime {
@@ -494,25 +525,49 @@ func (s *Store) DispatchTasks(ctx context.Context) (placed int, err error) {
 				if _, e = tx.ExecContext(ctx, "UPDATE tasks SET secret=NULL WHERE id=?", t.ID); e != nil {
 					return e
 				}
+				if _, e = tx.ExecContext(ctx, "INSERT INTO audit(at,event,target) VALUES(?,?,?)", s.Now().Unix(), "task.expire", t.ID); e != nil {
+					return e
+				}
+				continue
+			}
+			if blocked[t.Pool] {
 				continue
 			}
 			inst, e := s.dispatchTx(ctx, tx, c, runs, t)
 			if e != nil {
 				return e
 			}
-			if inst != nil {
-				runs = append(runs, *inst)
-				placed++
+			if inst == nil {
+				blocked[t.Pool] = true
+				continue
 			}
+			runs = append(runs, *inst)
+			placed++
 		}
 		return nil
 	})
 	return
 }
 
-func deriveTaskState(t Task, inst *Instance, result *TaskResult) string {
+// collectingGrace keeps a Deleted task without a result in Collecting for a
+// while: the Node reports the result right after deletion, sometimes a Step
+// later. After that, Finished means that no result will arrive.
+const collectingGrace = 2 * time.Minute
+
+func deriveTaskState(t Task, inst *Instance, result *TaskResult, now time.Time) string {
 	if t.Expired {
 		return "Expired"
+	}
+	finished := inst == nil || inst.State == "Deleting" || inst.State == "Deleted"
+	if result != nil && finished {
+		switch {
+		case result.Status == "succeeded":
+			return "Succeeded"
+		case t.Cancelled:
+			return "Cancelled"
+		default:
+			return "Failed"
+		}
 	}
 	if inst == nil {
 		switch {
@@ -520,32 +575,30 @@ func deriveTaskState(t Task, inst *Instance, result *TaskResult) string {
 			return "Cancelled"
 		case t.Instance == "":
 			return "Queued"
-		case result != nil:
-			return map[bool]string{true: "Succeeded", false: "Failed"}[result.Status == "succeeded"]
 		default:
 			return "Finished"
 		}
 	}
 	switch inst.State {
-	case "Reserved", "Provisioning":
+	case "Reserved", "Provisioning", "Idle", "Busy":
+		if t.Cancelled || !now.Before(inst.Deadline) {
+			return "Stopping"
+		}
+		if inst.State == "Idle" || inst.State == "Busy" {
+			return "Running"
+		}
 		return "Starting"
-	case "Idle", "Busy":
-		return "Running"
 	case "Stopping":
 		return "Stopping"
+	case "Deleted":
+		if t.Cancelled {
+			return "Cancelled"
+		}
+		if now.Sub(inst.Updated) > collectingGrace {
+			return "Finished"
+		}
 	}
-	switch {
-	case t.Cancelled && inst.State == "Deleted":
-		return "Cancelled"
-	case result != nil && result.Status == "succeeded":
-		return "Succeeded"
-	case result != nil:
-		return "Failed"
-	case inst.State == "Deleted":
-		return "Finished"
-	default:
-		return "Collecting"
-	}
+	return "Collecting"
 }
 
 func (s *Store) viewTask(t Task, inst *Instance, result, progress []byte, detail bool) (Task, error) {
@@ -575,7 +628,7 @@ func (s *Store) viewTask(t Task, inst *Instance, result, progress []byte, detail
 		d := inst.Deadline
 		t.Deadline = &d
 	}
-	t.State = deriveTaskState(t, inst, t.Result)
+	t.State = deriveTaskState(t, inst, t.Result, s.Now())
 	return t, nil
 }
 
@@ -593,14 +646,8 @@ func (s *Store) Task(ctx context.Context, client, id string, detail bool) (Task,
 	}
 	var inst *Instance
 	if t.Instance != "" {
-		runs, e := s.Instances(ctx)
-		if e != nil {
+		if inst, e = readInstance(ctx, s.DB, t.Instance); e != nil {
 			return Task{}, e
-		}
-		for i := range runs {
-			if runs[i].ID == t.Instance {
-				inst = &runs[i]
-			}
 		}
 	}
 	return s.viewTask(t, inst, result, progress, detail)
@@ -642,13 +689,16 @@ func (s *Store) Tasks(ctx context.Context, client string, limit int) ([]Task, er
 	if e = rows.Err(); e != nil {
 		return nil, e
 	}
-	runs, e := s.Instances(ctx)
-	if e != nil {
-		return nil, e
-	}
 	byID := map[string]*Instance{}
-	for i := range runs {
-		byID[runs[i].ID] = &runs[i]
+	for _, r := range list {
+		if r.t.Instance == "" {
+			continue
+		}
+		inst, e := readInstance(ctx, s.DB, r.t.Instance)
+		if e != nil {
+			return nil, e
+		}
+		byID[r.t.Instance] = inst
 	}
 	out := []Task{}
 	for _, r := range list {
@@ -668,15 +718,26 @@ func (s *Store) CancelTask(ctx context.Context, client, id string) error {
 		return Fail("TASK_NOT_FOUND", "タスクがありません", nil)
 	}
 	return s.transaction(ctx, func(tx *sql.Tx) error {
-		t, _, _, _, e := readTaskRow(ctx, tx, "SELECT payload,result,progress,secret FROM tasks WHERE id=?", id)
+		t, result, _, _, e := readTaskRow(ctx, tx, "SELECT payload,result,progress,secret FROM tasks WHERE id=?", id)
 		if e != nil {
 			return e
 		}
 		if client != "" && t.Client != client {
 			return Fail("TASK_NOT_FOUND", "タスクがありません", nil)
 		}
-		if t.Cancelled || t.Expired {
+		if t.Cancelled || t.Expired || len(result) > 0 {
 			return nil
+		}
+		if t.Instance != "" {
+			inst, e := readInstance(ctx, tx, t.Instance)
+			if e != nil {
+				return e
+			}
+			// A finished VM keeps its outcome; cancelling it would only
+			// relabel a result that already exists.
+			if inst == nil || inst.State == "Deleting" || inst.State == "Deleted" {
+				return nil
+			}
 		}
 		t.Cancelled = true
 		t.Updated = s.Now().UTC()
@@ -722,15 +783,9 @@ func (s *Store) ReportTask(ctx context.Context, node, id string, r TaskReport) e
 		if e != nil {
 			return e
 		}
-		runs, e := readInstances(ctx, tx)
+		inst, e := readInstance(ctx, tx, r.Instance)
 		if e != nil {
 			return e
-		}
-		var inst *Instance
-		for i := range runs {
-			if runs[i].ID == r.Instance {
-				inst = &runs[i]
-			}
 		}
 		if inst == nil || inst.Task != id || t.Instance != inst.ID || inst.Node != node {
 			return Fail("TASK_NOT_OWNED", "このNodeのタスクではありません", nil)
@@ -758,7 +813,8 @@ func (s *Store) ReportTask(ctx context.Context, node, id string, r TaskReport) e
 		if len(result) > 0 {
 			return nil
 		}
-		plain, _ := json.Marshal(r.Result)
+		bound := bindResult(t, *r.Result)
+		plain, _ := json.Marshal(bound)
 		sealed, e := s.seal(id, "result", plain)
 		if e != nil {
 			return e
@@ -773,13 +829,21 @@ func (s *Store) ReportTask(ctx context.Context, node, id string, r TaskReport) e
 }
 
 // taskPayloadTx decrypts a task payload for the ensure command of its Node.
+// It returns nil (no delivery) for cancelled or expired tasks and for tasks of
+// a revoked client: credentials never leave the Controller after revocation.
 func (s *Store) taskPayloadTx(ctx context.Context, tx *sql.Tx, a Instance) (*TaskPayload, error) {
-	var secret []byte
-	if e := tx.QueryRowContext(ctx, "SELECT secret FROM tasks WHERE id=?", a.Task).Scan(&secret); e != nil {
+	t, _, _, secret, e := readTaskRow(ctx, tx, "SELECT payload,result,progress,secret FROM tasks WHERE id=?", a.Task)
+	if e != nil {
 		return nil, e
 	}
-	if len(secret) == 0 {
+	if len(secret) == 0 || t.Cancelled || t.Expired {
 		return nil, nil
+	}
+	var revoked bool
+	if e = tx.QueryRowContext(ctx, "SELECT revoked FROM clients WHERE name=?", t.Client).Scan(&revoked); errors.Is(e, sql.ErrNoRows) || revoked {
+		return nil, nil
+	} else if e != nil {
+		return nil, e
 	}
 	plain, e := s.open(a.Task, "payload", secret)
 	if e != nil {
@@ -793,6 +857,40 @@ func (s *Store) taskPayloadTx(ctx context.Context, tx *sql.Tx, a Instance) (*Tas
 		return nil, errors.New("task payload identity mismatch")
 	}
 	return &p, nil
+}
+
+// readInstance loads one Instance by ID, or nil when it does not exist.
+func readInstance(ctx context.Context, q rowReader, id string) (*Instance, error) {
+	var b []byte
+	e := q.QueryRowContext(ctx, "SELECT payload FROM instances WHERE id=?", id).Scan(&b)
+	if errors.Is(e, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if e != nil {
+		return nil, e
+	}
+	var a Instance
+	if e = json.Unmarshal(b, &a); e != nil {
+		return nil, e
+	}
+	return &a, nil
+}
+
+var pullNumber = regexp.MustCompile(`^[1-9][0-9]{0,9}$`)
+
+// bindResult ties guest-reported locations to what the task asked for: the
+// branch is the task's branch, and a pull request URL must point into the
+// task's own github.com repository. Anything else is dropped.
+func bindResult(t Task, r TaskResult) TaskResult {
+	r.Branch = t.Branch
+	if r.PullRequestURL != "" {
+		repo, ok := RepositoryPath(t.Repository)
+		prefix := "https://github.com/" + strings.ToLower(repo) + "/pull/"
+		if !ok || !strings.HasPrefix(strings.ToLower(r.PullRequestURL), prefix) || !pullNumber.MatchString(r.PullRequestURL[len(prefix):]) {
+			r.PullRequestURL = ""
+		}
+	}
+	return r
 }
 
 type ClientRecord struct {
@@ -815,11 +913,17 @@ func (s *Store) ApproveClient(ctx context.Context, ca CA, name string, csr []byt
 		if rev == 0 {
 			return Fail("NOT_CONFIGURED", "先にClusterを設定してください", nil)
 		}
-		var n int
-		if e = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM clients WHERE name=?", name).Scan(&n); e != nil {
+		var revoked bool
+		e = tx.QueryRowContext(ctx, "SELECT revoked FROM clients WHERE name=?", name).Scan(&revoked)
+		exists := e == nil
+		if e != nil && !errors.Is(e, sql.ErrNoRows) {
 			return e
 		}
-		if n > 0 && !replace {
+		if exists && revoked {
+			// A new key must not inherit a revoked client's tasks and results.
+			return Fail("CLIENT_REVOKED", "失効したクライアント名は再利用できません。別の名前で登録してください", name)
+		}
+		if exists && !replace {
 			return Fail("CLIENT_EXISTS", "同名のクライアントがあります。置き換えるなら --replace を指定してください", name)
 		}
 		cert, e = ca.SignClient(csr, c.Name, name)
@@ -827,7 +931,7 @@ func (s *Store) ApproveClient(ctx context.Context, ca CA, name string, csr []byt
 			return e
 		}
 		cluster = c.Name
-		if _, e = tx.ExecContext(ctx, "INSERT INTO clients(name,certificate_hash,revoked,created) VALUES(?,?,0,?) ON CONFLICT(name) DO UPDATE SET certificate_hash=excluded.certificate_hash,revoked=0", name, Hash(cert), s.Now().Unix()); e != nil {
+		if _, e = tx.ExecContext(ctx, "INSERT INTO clients(name,certificate_hash,revoked,created) VALUES(?,?,0,?) ON CONFLICT(name) DO UPDATE SET certificate_hash=excluded.certificate_hash,previous_hash='',previous_until=0", name, Hash(cert), s.Now().Unix()); e != nil {
 			return e
 		}
 		_, e = tx.ExecContext(ctx, "INSERT INTO audit(at,event,target) VALUES(?,?,?)", s.Now().Unix(), "client.approve", name)
@@ -836,18 +940,25 @@ func (s *Store) ApproveClient(ctx context.Context, ca CA, name string, csr []byt
 	return
 }
 
+// clientRenewalGrace keeps the previous certificate valid after a renewal, so
+// other processes of the same client (several MCP servers, a CLI call) keep
+// working until they reload the renewed certificate.
+const clientRenewalGrace = 7 * 24 * time.Hour
+
 func (s *Store) AuthorizeClient(ctx context.Context, name string, certPEM []byte) error {
 	var revoked bool
-	var hash string
-	e := s.DB.QueryRowContext(ctx, "SELECT revoked,certificate_hash FROM clients WHERE name=?", name).Scan(&revoked, &hash)
-	if e != nil || revoked || hash != Hash(certPEM) {
+	var hash, previous string
+	var until int64
+	e := s.DB.QueryRowContext(ctx, "SELECT revoked,certificate_hash,previous_hash,previous_until FROM clients WHERE name=?", name).Scan(&revoked, &hash, &previous, &until)
+	got := Hash(certPEM)
+	if e != nil || revoked || (hash != got && (previous == "" || previous != got || s.Now().Unix() >= until)) {
 		return Fail("CLIENT_UNAUTHORIZED", "クライアントは未承認または失効済みです", nil)
 	}
 	return nil
 }
 
 func (s *Store) UpdateClientCertificate(ctx context.Context, name string, certPEM []byte) error {
-	r, e := s.DB.ExecContext(ctx, "UPDATE clients SET certificate_hash=? WHERE name=? AND revoked=0", Hash(certPEM), name)
+	r, e := s.DB.ExecContext(ctx, "UPDATE clients SET previous_hash=certificate_hash,previous_until=?,certificate_hash=? WHERE name=? AND revoked=0", s.Now().Add(clientRenewalGrace).Unix(), Hash(certPEM), name)
 	if e != nil {
 		return e
 	}
@@ -857,8 +968,9 @@ func (s *Store) UpdateClientCertificate(ctx context.Context, name string, certPE
 	return nil
 }
 
-// RevokeClient rejects the client's future requests and erases its queued
-// payloads. Placed VMs keep their resources until the host confirms stop.
+// RevokeClient rejects the client's future requests, erases its queued
+// payloads and asks the Nodes to stop its placed VMs. Resources stay held
+// until each host confirms shutdown; payload delivery stops at once.
 func (s *Store) RevokeClient(ctx context.Context, name string) (cancelled int, err error) {
 	err = s.transaction(ctx, func(tx *sql.Tx) error {
 		r, e := tx.ExecContext(ctx, "UPDATE clients SET revoked=1 WHERE name=?", name)
@@ -872,7 +984,7 @@ func (s *Store) RevokeClient(ctx context.Context, name string) (cancelled int, e
 		if e != nil {
 			return e
 		}
-		queued := []Task{}
+		live := []Task{}
 		for rows.Next() {
 			var b []byte
 			var t Task
@@ -883,21 +995,34 @@ func (s *Store) RevokeClient(ctx context.Context, name string) (cancelled int, e
 				rows.Close()
 				return e
 			}
-			if t.Instance == "" {
-				queued = append(queued, t)
+			if !t.Cancelled && !t.Expired {
+				live = append(live, t)
 			}
 		}
 		rows.Close()
 		if e = rows.Err(); e != nil {
 			return e
 		}
-		for _, t := range queued {
+		for _, t := range live {
+			if t.Instance != "" {
+				inst, e := readInstance(ctx, tx, t.Instance)
+				if e != nil {
+					return e
+				}
+				if inst == nil || inst.State == "Deleting" || inst.State == "Deleted" {
+					continue
+				}
+				inst.State = "Stopping"
+				inst.Updated = s.Now().UTC()
+				if e = saveInstance(ctx, tx, *inst); e != nil {
+					return e
+				}
+			} else if _, e = tx.ExecContext(ctx, "UPDATE tasks SET secret=NULL WHERE id=?", t.ID); e != nil {
+				return e
+			}
 			t.Cancelled = true
 			t.Updated = s.Now().UTC()
 			if e = saveTask(ctx, tx, t); e != nil {
-				return e
-			}
-			if _, e = tx.ExecContext(ctx, "UPDATE tasks SET secret=NULL WHERE id=?", t.ID); e != nil {
 				return e
 			}
 			cancelled++

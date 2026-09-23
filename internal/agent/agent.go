@@ -38,7 +38,8 @@ func acceptCommand(node string, ceiling core.Resources, cmd core.Command) error 
 	}
 	// A task payload travels only with an ensure of the matching task instance,
 	// and a task instance never receives a GitHub JIT configuration.
-	if cmd.Task != nil && (cmd.Action != "ensure" || cmd.Task.ID != cmd.Instance.Task) || cmd.Action == "ensure" && cmd.Instance.Task != "" && (cmd.Task == nil || cmd.JIT != "" || !cmd.Instance.Pool.Tasks) {
+	if cmd.Task != nil && (cmd.Action != "ensure" || cmd.Instance.Task == "" || cmd.Task.ID != cmd.Instance.Task) ||
+		cmd.Action == "ensure" && (cmd.Instance.Task != "" || cmd.Instance.Pool.Tasks) && (cmd.Task == nil || cmd.JIT != "" || !cmd.Instance.Pool.Tasks || cmd.Instance.Task == "") {
 		return errors.New("controller task command does not match its instance")
 	}
 	return nil

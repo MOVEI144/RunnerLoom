@@ -28,6 +28,7 @@ type Tool struct {
 	InputSchema map[string]any
 	ReadOnly    bool
 	Destructive bool
+	OpenWorld   bool
 	Handler     func(context.Context, json.RawMessage) (any, error)
 }
 
@@ -79,7 +80,7 @@ func (s *Server) listTools() map[string]any {
 	for _, t := range s.Tools {
 		tools = append(tools, map[string]any{
 			"name": t.Name, "title": t.Title, "description": t.Description, "inputSchema": t.InputSchema,
-			"annotations": map[string]any{"title": t.Title, "readOnlyHint": t.ReadOnly, "destructiveHint": t.Destructive, "idempotentHint": t.ReadOnly, "openWorldHint": false},
+			"annotations": map[string]any{"title": t.Title, "readOnlyHint": t.ReadOnly, "destructiveHint": t.Destructive, "idempotentHint": t.ReadOnly, "openWorldHint": t.OpenWorld},
 		})
 	}
 	return map[string]any{"tools": tools}
@@ -126,13 +127,22 @@ func (s *Server) callTool(ctx context.Context, params json.RawMessage) (any, *rp
 // Handle processes one JSON-RPC message and returns the encoded response, or
 // nil for notifications and client responses.
 func (s *Server) Handle(ctx context.Context, raw []byte) []byte {
-	var q request
-	if e := json.Unmarshal(raw, &q); e != nil || q.JSONRPC != "2.0" {
-		b, _ := json.Marshal(response{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcError{-32700, "parse error"}})
+	reply := func(id json.RawMessage, code int, msg string) []byte {
+		b, _ := json.Marshal(response{JSONRPC: "2.0", ID: id, Error: &rpcError{code, msg}})
 		return b
 	}
-	if len(q.ID) == 0 || string(q.ID) == "null" {
-		return nil // notification (initialized, cancelled, ...) or a response
+	if trimmed := strings.TrimSpace(string(raw)); strings.HasPrefix(trimmed, "[") {
+		return reply(json.RawMessage("null"), -32600, "batch requests are not supported")
+	}
+	var q request
+	if e := json.Unmarshal(raw, &q); e != nil {
+		return reply(json.RawMessage("null"), -32700, "parse error")
+	}
+	if len(q.ID) == 0 || string(q.ID) == "null" || q.Method == "" {
+		return nil // notification (initialized, cancelled, ...) or a client response
+	}
+	if q.JSONRPC != "2.0" {
+		return reply(q.ID, -32600, "invalid request: jsonrpc must be 2.0")
 	}
 	out := response{JSONRPC: "2.0", ID: q.ID}
 	switch q.Method {

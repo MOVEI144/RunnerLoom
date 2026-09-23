@@ -524,6 +524,9 @@ func (l *Libvirt) ensure(ctx context.Context, a core.Instance, w job) error {
 	if !time.Now().Before(a.Deadline) {
 		return errors.New("VM request expired")
 	}
+	if w.kind == "task" && time.Until(a.Deadline) < MinimumTaskTime {
+		return errors.New("too little time left before the deadline to start an agent task")
+	}
 	if e = l.Ready(ctx); e != nil {
 		return e
 	}

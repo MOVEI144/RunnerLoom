@@ -45,11 +45,24 @@ func resultLog(t *testing.T, r core.TaskResult) string {
 
 func TestTaskCloudConfigCannotInjectKeys(t *testing.T) {
 	a, p := taskFixture()
-	p.Spec.Prompt = "x\nruncmd:\n  - [reboot]\n"
+	p.Spec.Prompt = "x\nruncmd:\n  - [reboot]\n\u007f\u0085\u009b"
 	p.Spec.Env = map[string]string{"OPENAI_API_KEY": "\"\n  - path: /etc/evil\n"}
 	b := string(taskCloudConfig(a, p))
-	if strings.Count(b, "\n  - path: ") != 2 || strings.Count(b, "\nruncmd:\n") != 1 {
+	if strings.Count(b, "\n  - path: ") != 2 || strings.Count(b, "\nruncmd:\n") != 1 || strings.Count(b, "encoding: b64") != 2 {
 		t.Fatalf("task content injected cloud-init keys:\n%s", b)
+	}
+	// Every byte outside the fixed template is base64: YAML never sees DEL or C1.
+	for _, r := range b {
+		if r == 0x7f || (r >= 0x80 && r <= 0x9f) || r > 0x7e {
+			t.Fatalf("non-ASCII or control rune %U reached the YAML seed", r)
+		}
+	}
+	if strings.Contains(b, "sudo") {
+		t.Fatal("task agent received sudo without asking for it")
+	}
+	p.Spec.Agent.Sudo = true
+	if !strings.Contains(string(taskCloudConfig(a, p)), "sudo: ['ALL=(ALL) NOPASSWD:ALL']") {
+		t.Fatal("sudo profile not honoured")
 	}
 	if !strings.HasPrefix(b, "#cloud-config\n") || !strings.Contains(b, "runnerloom-task") {
 		t.Fatal("wrong task seed")
@@ -133,7 +146,7 @@ func TestTaskReportsFinalResultOnceAndProgressWhileRunning(t *testing.T) {
 
 // TestGuestTaskRunner executes the embedded guest script locally (no VM, no
 // user switch, no network) against a local bare repository. It proves the
-// clone → agent → commit → push → result path of the script itself.
+// clone → agent → commit → clean-repository push → result path of the script.
 func TestGuestTaskRunner(t *testing.T) {
 	for _, tool := range []string{"python3", "git", "sh"} {
 		if _, e := exec.LookPath(tool); e != nil {
@@ -161,15 +174,15 @@ func TestGuestTaskRunner(t *testing.T) {
 		if e := os.Mkdir(home, 0700); e != nil {
 			t.Fatal(e)
 		}
-		doc, _ := json.Marshal(taskDocument{ID: core.ID(), Title: core.TaskTitle(spec.Prompt), TimeoutSeconds: 300, Spec: spec})
+		doc, _ := json.Marshal(taskDocument{ID: core.ID(), Title: core.TaskTitle(spec.Prompt), DeadlineUnix: time.Now().Add(20 * time.Minute).Unix(), Spec: spec})
 		payload := filepath.Join(t.TempDir(), "task.json")
 		if e := os.WriteFile(payload, doc, 0600); e != nil {
 			t.Fatal(e)
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "python3", script)
-		cmd.Env = append(os.Environ(), "RUNNERLOOM_TASK_PAYLOAD="+payload, "RUNNERLOOM_TASK_USER=", "RUNNERLOOM_TASK_HOME="+home, "RUNNERLOOM_TASK_POWEROFF=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
+		cmd.Env = append(os.Environ(), "RUNNERLOOM_TASK_PAYLOAD="+payload, "RUNNERLOOM_TASK_USER=", "RUNNERLOOM_TASK_HOME="+home, "RUNNERLOOM_TASK_STATE="+filepath.Join(t.TempDir(), "state"), "RUNNERLOOM_TASK_POWEROFF=0", "RUNNERLOOM_TASK_EMIT_REPEAT=2", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null")
 		out, e := cmd.CombinedOutput()
 		if e != nil {
 			t.Fatalf("runner failed: %v\n%s", e, out)
@@ -195,15 +208,13 @@ func TestGuestTaskRunner(t *testing.T) {
 		if e != nil || st.Mode().Perm() != 0600 {
 			t.Fatalf("credential file mode: %v %v", st, e)
 		}
-		cmd := exec.Command("git", "--git-dir", origin, "rev-parse", "refs/heads/runnerloom/test")
-		b, e := cmd.Output()
+		b, e := exec.Command("git", "--git-dir", origin, "rev-parse", "refs/heads/runnerloom/test").Output()
 		if e != nil || strings.TrimSpace(string(b)) != r.Commit {
 			t.Fatalf("branch not pushed: %s %v", b, e)
 		}
 		if strings.Contains(out, "unused-local-token") || strings.Contains(out, "key-1") {
 			t.Fatal("secret echoed to the serial log")
 		}
-		// A follow-up task continues the same branch.
 		spec.Prompt = "second round"
 		r2, _, out := run(t, spec)
 		if r2.Status != "succeeded" || !r2.Pushed || !strings.Contains(out, "continuing existing branch") {
@@ -212,6 +223,36 @@ func TestGuestTaskRunner(t *testing.T) {
 		b, _ = exec.Command("git", "--git-dir", origin, "rev-list", "--count", "refs/heads/runnerloom/test").Output()
 		if strings.TrimSpace(string(b)) != "3" {
 			t.Fatalf("continuation did not build on the branch: %s", b)
+		}
+	})
+	t.Run("agent git configuration cannot capture the token", func(t *testing.T) {
+		leak := filepath.Join(t.TempDir(), "leak.txt")
+		evil := core.AgentProfile{Name: "evil", Run: []string{"sh", "-c", `git config core.fsmonitor "env >> ` + leak + `" && git config remote.origin.url /nonexistent && git config alias.push '!env >> ` + leak + `' && mkdir -p .git/hooks && printf '#!/bin/sh\nenv >> ` + leak + `\n' > .git/hooks/pre-push && chmod +x .git/hooks/pre-push && echo change > evil.txt`}}
+		r, _, out := run(t, core.TaskSpec{Agent: evil, Prompt: "x", Repository: origin, Branch: "runnerloom/evil", GitToken: "SECRET-PUSH-TOKEN"})
+		if !r.Pushed {
+			t.Fatalf("push from the clean repository failed: %+v\n%s", r, out)
+		}
+		if b, _ := os.ReadFile(leak); strings.Contains(string(b), "SECRET-PUSH-TOKEN") {
+			t.Fatal("agent-controlled git configuration observed the token")
+		}
+	})
+	t.Run("default branch is refused", func(t *testing.T) {
+		r, _, _ := run(t, core.TaskSpec{Agent: agent, Prompt: "x", Repository: origin, Branch: "main", GitToken: "t"})
+		if r.Status != "failed" || !strings.Contains(r.Error, "refusing to work on the base or default branch") || r.Pushed {
+			t.Fatalf("%+v", r)
+		}
+		b, _ := exec.Command("git", "--git-dir", origin, "rev-list", "--count", "refs/heads/main").Output()
+		if strings.TrimSpace(string(b)) != "1" {
+			t.Fatal("default branch was modified")
+		}
+	})
+	t.Run("leftover agent processes cannot corrupt the result", func(t *testing.T) {
+		noisy := core.AgentProfile{Name: "noisy", Run: []string{"sh", "-c", `(while :; do echo background-noise-line; sleep 0.001; done) & echo started`}}
+		for i := 0; i < 3; i++ {
+			r, _, out := run(t, core.TaskSpec{Agent: noisy, Prompt: "x"})
+			if r.Status != "succeeded" {
+				t.Fatalf("%+v\n%s", r, out)
+			}
 		}
 	})
 	t.Run("no repository returns a patch", func(t *testing.T) {

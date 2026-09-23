@@ -32,11 +32,40 @@ type Profile struct {
 	Run         []string   `json:"run"`
 	Files       []FileSpec `json:"files,omitempty"`
 	Env         []string   `json:"env,omitempty"`
-	Builtin     bool       `json:"-"`
+	// Sudo lets the agent use sudo in the VM. It can then read every secret
+	// of the task, including the GitHub token.
+	Sudo    bool `json:"sudo,omitempty"`
+	Builtin bool `json:"-"`
 }
 
 func (p Profile) Agent() core.AgentProfile {
-	return core.AgentProfile{Name: p.Name, Binary: p.Binary, Runtime: p.Runtime, Install: p.Install, Run: p.Run}
+	return core.AgentProfile{Name: p.Name, Binary: p.Binary, Runtime: p.Runtime, Install: p.Install, Run: p.Run, Sudo: p.Sudo}
+}
+
+// Digest identifies the exact definition that the user allowed.
+func (p Profile) Digest() string {
+	p.Builtin = false
+	return core.Fingerprint(p)
+}
+
+// sensitive local locations are never read as agent credentials, even when a
+// profile asks for them (for example through a pasted agents.json).
+var sensitivePrefixes = []string{".ssh/", ".gnupg/", ".aws/", ".kube/", ".docker/", ".config/gh/", ".password-store/", ".config/runnerloom/"}
+var sensitiveFiles = []string{".netrc", ".git-credentials", ".pgpass", ".bash_history", ".zsh_history"}
+
+func sensitive(rel string) bool {
+	rel = filepath.ToSlash(rel)
+	for _, f := range sensitiveFiles {
+		if rel == f {
+			return true
+		}
+	}
+	for _, p := range sensitivePrefixes {
+		if strings.HasPrefix(rel+"/", p) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p Profile) Validate() error {
@@ -46,6 +75,9 @@ func (p Profile) Validate() error {
 	for _, f := range p.Files {
 		if !core.ValidHomePath(f.Path) || (f.From != "" && !filepath.IsAbs(f.From) && !strings.HasPrefix(f.From, "~/")) {
 			return core.Fail("INVALID_AGENT", "filesのpathはホーム配下の相対パス、fromは絶対パスか~/です", p.Name)
+		}
+		if sensitive(f.Path) || (strings.HasPrefix(f.From, "~/") && sensitive(f.From[2:])) {
+			return core.Fail("INVALID_AGENT", "SSH鍵・クラウド認証・履歴などの場所は送信できません", p.Name+":"+f.Path)
 		}
 	}
 	for _, k := range p.Env {
@@ -62,25 +94,38 @@ func validEnvName(k string) bool {
 }
 
 // Builtins are profiles for CLIs whose headless mode and credential location
-// are documented publicly. They are not qualified inside a real VM by this
+// are documented publicly (checked against each project's documentation and
+// sources in 2026-09). They are not qualified inside a real VM by this
 // repository's tests; override any of them in agents.json.
 func Builtins() []Profile {
 	return []Profile{
-		{Name: "claude", Description: "Claude Code (claude -p). OAuth file or CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY", Binary: "claude", Runtime: "node", Install: "npm install -g @anthropic-ai/claude-code",
+		{Name: "claude", Description: "Claude Code (claude -p). ~/.claude/.credentials.json, CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY (the API key wins when both are set)", Binary: "claude", Runtime: "node", Install: "npm install -g @anthropic-ai/claude-code",
 			Run:   []string{"claude", "-p", "{prompt}", "--dangerously-skip-permissions"},
 			Files: []FileSpec{{Path: ".claude/.credentials.json", Optional: true}}, Env: []string{"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"}},
-		{Name: "codex", Description: "OpenAI Codex CLI (codex exec). ~/.codex/auth.json or OPENAI_API_KEY", Binary: "codex", Runtime: "node", Install: "npm install -g @openai/codex",
+		{Name: "codex", Description: "OpenAI Codex CLI (codex exec). ~/.codex/auth.json or CODEX_API_KEY", Binary: "codex", Runtime: "node", Install: "npm install -g @openai/codex",
 			Run:   []string{"codex", "exec", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"},
-			Files: []FileSpec{{Path: ".codex/auth.json", Optional: true}}, Env: []string{"OPENAI_API_KEY", "CODEX_API_KEY"}},
-		{Name: "opencode", Description: "opencode (opencode run). ~/.local/share/opencode/auth.json or provider API keys", Binary: "opencode", Runtime: "node", Install: "npm install -g opencode-ai",
-			Run:   []string{"opencode", "run", "{prompt}"},
-			Files: []FileSpec{{Path: ".local/share/opencode/auth.json", Optional: true}}, Env: []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"}},
-		{Name: "pi", Description: "pi coding agent (pi -p). ~/.pi/agent/auth.json or provider API keys", Binary: "pi", Runtime: "node", Install: "npm install -g @mariozechner/pi-coding-agent",
+			Files: []FileSpec{{Path: ".codex/auth.json", Optional: true}}, Env: []string{"CODEX_API_KEY"}},
+		{Name: "opencode", Description: "opencode (opencode run --auto). ~/.local/share/opencode/auth.json or provider API keys", Binary: "opencode", Runtime: "node", Install: "npm install -g opencode-ai",
+			Run:   []string{"opencode", "run", "--auto", "{prompt}"},
+			Files: []FileSpec{{Path: ".local/share/opencode/auth.json", Optional: true}, {Path: ".config/opencode/opencode.json", Optional: true}}, Env: []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"}},
+		{Name: "pi", Description: "pi coding agent (pi -p). ~/.pi/agent/auth.json or provider API keys", Binary: "pi", Runtime: "node", Install: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent",
 			Run:   []string{"pi", "-p", "{prompt}"},
 			Files: []FileSpec{{Path: ".pi/agent/auth.json", Optional: true}, {Path: ".pi/agent/settings.json", Optional: true}, {Path: ".pi/agent/models.json", Optional: true}}, Env: []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"}},
-		{Name: "gemini", Description: "Gemini CLI (gemini -p). ~/.gemini OAuth files or GEMINI_API_KEY", Binary: "gemini", Runtime: "node", Install: "npm install -g @google/gemini-cli",
-			Run:   []string{"gemini", "--yolo", "-p", "{prompt}"},
-			Files: []FileSpec{{Path: ".gemini/oauth_creds.json", Optional: true}, {Path: ".gemini/google_accounts.json", Optional: true}, {Path: ".gemini/settings.json", Optional: true}}, Env: []string{"GEMINI_API_KEY", "GOOGLE_API_KEY"}},
+		{Name: "gemini", Description: "Gemini CLI (gemini -p). ~/.gemini OAuth files (settings.json must select the auth type) or GEMINI_API_KEY", Binary: "gemini", Runtime: "node", Install: "npm install -g @google/gemini-cli",
+			Run:   []string{"gemini", "--yolo", "--skip-trust", "-p", "{prompt}"},
+			Files: []FileSpec{{Path: ".gemini/oauth_creds.json", Optional: true}, {Path: ".gemini/google_accounts.json", Optional: true}, {Path: ".gemini/settings.json", Optional: true}}, Env: []string{"GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_GCA", "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION"}},
+		{Name: "grok", Description: "xAI Grok Build (grok --prompt-file). ~/.grok/auth.json or XAI_API_KEY", Binary: "grok",
+			Install: `curl -fsSL https://x.ai/cli/install.sh | GROK_BIN_DIR=/usr/local/bin bash && cp --remove-destination "$(readlink -f /usr/local/bin/grok)" /usr/local/bin/grok`,
+			Run:     []string{"grok", "--always-approve", "--no-auto-update", "--prompt-file", "{promptFile}"},
+			Files:   []FileSpec{{Path: ".grok/auth.json", Optional: true}, {Path: ".grok/config.toml", Optional: true}}, Env: []string{"XAI_API_KEY"}},
+		{Name: "musecode", Description: "Meta Muse Code (muse exec). ~/.config/muse/auth.json or META_API_KEY", Binary: "muse",
+			Install: "curl -fsSL https://dev.meta.ai/install.sh | MUSE_INSTALL_DIR=/usr/local/bin bash",
+			Run:     []string{"muse", "exec", "--yolo", "--prompt-file", "{promptFile}"},
+			Files:   []FileSpec{{Path: ".config/muse/auth.json", Optional: true}, {Path: ".config/muse/settings.json", Optional: true}}, Env: []string{"META_API_KEY"}},
+		{Name: "agy", Description: "Google Antigravity CLI (agy -p). GEMINI_API_KEY only: its account login lives in the OS keyring and cannot be copied", Binary: "agy",
+			Install: "curl -fsSL https://antigravity.google/cli/install.sh | bash -s -- --dir /usr/local/bin",
+			Run:     []string{"agy", "-p", "{prompt}", "--dangerously-skip-permissions"},
+			Env:     []string{"GEMINI_API_KEY"}},
 	}
 }
 
@@ -174,8 +219,9 @@ func (p Profile) source(home string, f FileSpec) string {
 
 // Credentials reports what would be sent, without contents.
 type Credentials struct {
-	Files []string `json:"files"`
-	Env   []string `json:"env"`
+	Files   []string `json:"files"`
+	Sources []string `json:"localSources"`
+	Env     []string `json:"env"`
 }
 
 // Collect reads the profile's local credentials. At least one file or
@@ -183,9 +229,13 @@ type Credentials struct {
 func (p Profile) Collect(home string, getenv func(string) string) ([]core.TaskFile, map[string]string, Credentials, error) {
 	files := []core.TaskFile{}
 	env := map[string]string{}
-	found := Credentials{Files: []string{}, Env: []string{}}
+	found := Credentials{Files: []string{}, Sources: []string{}, Env: []string{}}
 	for _, f := range p.Files {
 		src := p.source(home, f)
+		rel, e := filepath.Rel(home, src)
+		if e != nil || rel == ".." || strings.HasPrefix(rel, "../") || filepath.IsAbs(rel) || sensitive(rel) {
+			return nil, nil, found, core.Fail("UNSAFE_CREDENTIAL", "ホーム外や機密の場所（SSH鍵など）からは送信しません", src)
+		}
 		b, e := readLocal(src, core.MaxTaskFile)
 		if errors.Is(e, os.ErrNotExist) {
 			if f.Optional {
@@ -198,6 +248,7 @@ func (p Profile) Collect(home string, getenv func(string) string) ([]core.TaskFi
 		}
 		files = append(files, core.TaskFile{Path: f.Path, Content: b})
 		found.Files = append(found.Files, f.Path)
+		found.Sources = append(found.Sources, src)
 	}
 	for _, k := range p.Env {
 		if v := getenv(k); v != "" {
@@ -216,19 +267,21 @@ func (p Profile) Collect(home string, getenv func(string) string) ([]core.TaskFi
 	return files, env, found, nil
 }
 
-// GitHubToken reads GH_TOKEN / GITHUB_TOKEN, else <dir>/github-token (0600).
+// GitHubToken prefers the dedicated owner-only file <dir>/github-token (meant
+// for a fine-grained PAT limited to the target repositories), then
+// RUNNERLOOM_GITHUB_TOKEN, and only then the general GH_TOKEN / GITHUB_TOKEN.
 func GitHubToken(dir string, getenv func(string) string) (string, error) {
-	for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN"} {
+	b, e := core.ReadSecret(filepath.Join(dir, "github-token"))
+	if e == nil {
+		return strings.TrimSpace(string(b)), nil
+	}
+	if !os.IsNotExist(e) {
+		return "", e
+	}
+	for _, k := range []string{"RUNNERLOOM_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
 		if v := strings.TrimSpace(getenv(k)); v != "" {
 			return v, nil
 		}
 	}
-	b, e := core.ReadSecret(filepath.Join(dir, "github-token"))
-	if os.IsNotExist(e) {
-		return "", nil
-	}
-	if e != nil {
-		return "", e
-	}
-	return strings.TrimSpace(string(b)), nil
+	return "", nil
 }

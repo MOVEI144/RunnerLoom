@@ -120,7 +120,9 @@ func TestServiceAllowListPoolAndContinuation(t *testing.T) {
 	writeFile(t, filepath.Join(home, ".codex/auth.json"), "A", 0600)
 	api := &fakeAPI{pools: []core.TaskPool{{Name: "agent-tasks"}, {Name: "big"}}}
 	conf, _ := LoadConfig(dir)
-	svc := &Service{Dir: dir, Config: conf, API: api, Profiles: map[string]Profile{"codex": Builtins()[1]}, Home: home, Getenv: func(k string) string { return map[string]string{"GH_TOKEN": "gh"}[k] }}
+	codex := Builtins()[1]
+	codex.Builtin = true
+	svc := &Service{Dir: dir, Config: conf, API: api, Profiles: map[string]Profile{"codex": codex}, Home: home, Getenv: func(k string) string { return map[string]string{"GH_TOKEN": "gh"}[k] }}
 	ctx := context.Background()
 	if _, e := svc.Start(ctx, StartRequest{Agent: "codex", Prompt: "p"}); code(e) != "AGENT_NOT_ALLOWED" {
 		t.Fatalf("%v", e)

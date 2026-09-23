@@ -20,8 +20,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/MOVEI144/RunnerLoom/internal/core"
@@ -37,6 +39,9 @@ type ClientConfig struct {
 	Allow        []string `json:"allow"`
 	DefaultPool  string   `json:"defaultPool,omitempty"`
 	DefaultAgent string   `json:"defaultAgent,omitempty"`
+	// Pinned records the digest of each allowed non-built-in profile. A
+	// changed agents.json entry must be allowed again before it can run.
+	Pinned map[string]string `json:"pinned,omitempty"`
 }
 
 // Bundle carries only public material from the Controller administrator back
@@ -73,6 +78,29 @@ func DefaultDir() string {
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "runnerloom", "client")
+}
+
+// ResolveDir resolves symbolic links in the parents of dir once (for example a
+// home reached through /home -> /data/home, or a stow-managed ~/.config), so
+// the owner-only checks then apply to the real directory.
+func ResolveDir(dir string) (string, error) {
+	if !filepath.IsAbs(dir) {
+		return "", core.Fail("CLIENT_DIR", "クライアント設定ディレクトリは絶対パスで指定してください", dir)
+	}
+	parent := filepath.Dir(filepath.Clean(dir))
+	for p := parent; ; p = filepath.Dir(p) {
+		if _, e := os.Lstat(p); e == nil {
+			real, e := filepath.EvalSymlinks(p)
+			if e != nil {
+				return "", e
+			}
+			rest, _ := filepath.Rel(p, parent)
+			return filepath.Join(real, rest, filepath.Base(dir)), nil
+		}
+		if p == filepath.Dir(p) {
+			return dir, nil
+		}
+	}
 }
 
 func LoadConfig(dir string) (ClientConfig, error) {
@@ -145,10 +173,28 @@ func parseLeaf(certPEM []byte) (*x509.Certificate, error) {
 	return x509.ParseCertificate(p.Bytes)
 }
 
+// NormalizeFingerprint accepts "sha256:" prefixes and colon-separated hex.
+func NormalizeFingerprint(v string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	v = strings.TrimPrefix(v, "sha256:")
+	return strings.ReplaceAll(v, ":", "")
+}
+
 // Install verifies an approved bundle against the local key and pins the CA.
-func Install(dir string, b Bundle) (ClientConfig, error) {
+// caFingerprint must come from the administrator out of band (the approve
+// output): the bundle is not secret, but a swapped bundle would otherwise pin
+// an attacker's CA and send every later task there.
+func Install(dir string, b Bundle, caFingerprint string, replace bool) (ClientConfig, error) {
 	c, e := LoadConfig(dir)
 	if e != nil {
+		return c, e
+	}
+	if NormalizeFingerprint(caFingerprint) != NormalizeFingerprint(b.Fingerprint) || NormalizeFingerprint(caFingerprint) == "" {
+		return c, core.Fail("BUNDLE_MISMATCH", "CAの指紋が、Controllerで表示された値と一致しません", nil)
+	}
+	if old, e := core.ReadSecret(filepath.Join(dir, "ca.sha256")); e == nil && NormalizeFingerprint(string(old)) != NormalizeFingerprint(b.Fingerprint) && !replace {
+		return c, core.Fail("CLIENT_EXISTS", "別のControllerのCAが既に登録されています。置き換えるなら --replace を指定してください", nil)
+	} else if e != nil && !os.IsNotExist(e) {
 		return c, e
 	}
 	if b.Name != c.Name {
@@ -251,7 +297,8 @@ func (c *Client) reload() error {
 		if e != nil {
 			return nil, e
 		}
-		if strings.HasSuffix(strings.ToLower(host), ".local") {
+		// Linux resolves .local through Avahi here; macOS resolves it natively.
+		if runtime.GOOS == "linux" && strings.HasSuffix(strings.ToLower(host), ".local") {
 			ip, e := discovery.ResolveLocal(ctx, host)
 			if e != nil {
 				return nil, e
@@ -322,6 +369,17 @@ func (c *Client) renew(ctx context.Context) error {
 	}
 	c.checked = time.Now()
 	c.mu.Unlock()
+	// Several processes of one client (MCP servers, CLI) may renew at the same
+	// time; one renews, the others then see the fresh certificate.
+	lock, e := os.OpenFile(filepath.Join(c.Dir, "renew.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	if e != nil {
+		return e
+	}
+	defer lock.Close()
+	if e = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); e != nil {
+		return e
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	certPEM, e := core.ReadSecret(filepath.Join(c.Dir, "client.pem"))
 	if e != nil {
 		return e
@@ -331,7 +389,9 @@ func (c *Client) renew(ctx context.Context) error {
 		return e
 	}
 	if time.Until(leaf.NotAfter) > 30*24*time.Hour {
-		return nil
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.reload() // another process may have renewed it
 	}
 	keyPEM, e := core.ReadSecret(filepath.Join(c.Dir, "client-key.pem"))
 	if e != nil {
@@ -383,7 +443,18 @@ func (c *Client) call(ctx context.Context, method, path string, body, out any) e
 		// A failed early renewal is retried later; the current certificate
 		// remains valid for weeks.
 	}
-	return c.do(ctx, method, path, body, out)
+	e := c.do(ctx, method, path, body, out)
+	var fault *core.Error
+	if errors.As(e, &fault) && fault.Code == "CLIENT_UNAUTHORIZED" {
+		// Another process may have renewed the certificate on disk.
+		c.mu.Lock()
+		reloadErr := c.reload()
+		c.mu.Unlock()
+		if reloadErr == nil {
+			return c.do(ctx, method, path, body, out)
+		}
+	}
+	return e
 }
 
 func (c *Client) Pools(ctx context.Context) ([]core.TaskPool, error) {

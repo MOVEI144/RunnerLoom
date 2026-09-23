@@ -24,21 +24,29 @@ import (
 //go:embed task-runner.py
 var taskRunnerScript string
 
-// taskDocument is written to the guest only. timeoutSeconds is derived from
-// the Controller deadline when the seed is built, like the runner timeout.
+// taskDocument is written to the guest only. deadlineUnix is the Controller
+// deadline; the guest derives every step's budget from it.
 type taskDocument struct {
-	ID             string        `json:"id"`
-	Title          string        `json:"title"`
-	TimeoutSeconds int64         `json:"timeoutSeconds"`
-	Spec           core.TaskSpec `json:"spec"`
+	ID           string        `json:"id"`
+	Title        string        `json:"title"`
+	DeadlineUnix int64         `json:"deadlineUnix"`
+	Spec         core.TaskSpec `json:"spec"`
 }
 
+// MinimumTaskTime refuses to boot a task VM that could not finish its setup.
+const MinimumTaskTime = 10 * time.Minute
+
 func taskCloudConfig(a core.Instance, p core.TaskPayload) []byte {
-	doc := taskDocument{ID: p.ID, Title: core.TaskTitle(p.Spec.Prompt), TimeoutSeconds: max(int64(60), a.Deadline.Unix()-time.Now().Unix()-300), Spec: p.Spec}
+	doc := taskDocument{ID: p.ID, Title: core.TaskTitle(p.Spec.Prompt), DeadlineUnix: a.Deadline.Unix(), Spec: p.Spec}
 	b, _ := json.Marshal(doc)
-	// JSON string scalars are also valid YAML scalars. No interpolation can add YAML keys.
-	quote := func(s string) string { v, _ := json.Marshal(s); return string(v) }
-	return []byte("#cloud-config\nbootcmd:\n  - [systemctl, mask, --now, serial-getty@ttyS0.service]\n  - [systemctl, mask, --now, ssh.service, ssh.socket]\nssh_pwauth: false\ndisable_root: true\nusers:\n  - name: runner\n    lock_passwd: true\n    shell: /bin/bash\n    sudo: ['ALL=(ALL) NOPASSWD:ALL']\nwrite_files:\n  - path: /run/runnerloom-task.json\n    permissions: '0600'\n    content: " + quote(string(b)) + "\n  - path: /usr/local/sbin/runnerloom-task\n    permissions: '0700'\n    content: " + quote(taskRunnerScript) + "\nruncmd:\n  - [bash, -c, 'exec /usr/bin/python3 /usr/local/sbin/runnerloom-task >/dev/ttyS0 2>&1']\n")
+	// Base64 keeps arbitrary prompt bytes (DEL, C1 controls) out of the YAML
+	// parser, which would otherwise reject the whole seed.
+	b64 := func(v []byte) string { return base64.StdEncoding.EncodeToString(v) }
+	sudo := ""
+	if p.Spec.Agent.Sudo {
+		sudo = "    sudo: ['ALL=(ALL) NOPASSWD:ALL']\n"
+	}
+	return []byte("#cloud-config\nbootcmd:\n  - [systemctl, mask, --now, serial-getty@ttyS0.service]\n  - [systemctl, mask, --now, ssh.service, ssh.socket]\nssh_pwauth: false\ndisable_root: true\nusers:\n  - name: runner\n    lock_passwd: true\n    shell: /bin/bash\n" + sudo + "write_files:\n  - path: /run/runnerloom-task.json\n    permissions: '0600'\n    encoding: b64\n    content: " + b64(b) + "\n  - path: /usr/local/sbin/runnerloom-task\n    permissions: '0700'\n    encoding: b64\n    content: " + b64([]byte(taskRunnerScript)) + "\nruncmd:\n  - [bash, -c, 'exec /usr/bin/python3 /usr/local/sbin/runnerloom-task >/dev/ttyS0 2>&1']\n")
 }
 
 // EnsureTask boots a disposable VM for one agent task. It shares every
@@ -61,6 +69,13 @@ var taskEnd = regexp.MustCompile(`^RUNNERLOOM_TASK_RESULT_END ([0-9]{1,5}) ([a-f
 // The guest is untrusted: a missing, partial or mismatched result is reported
 // as such and never changes VM ownership or lifecycle.
 func ParseTaskResult(log []byte) (core.TaskResult, error) {
+	// Only the region before the last END line can hold the result (at most a
+	// few MiB of chunks); splitting the whole 16 MiB log per Step is wasteful.
+	if i := bytes.LastIndex(log, []byte("\nRUNNERLOOM_TASK_RESULT_END ")); i >= 0 {
+		log = log[max(0, i-(4<<20)):]
+	} else if !bytes.HasPrefix(log, []byte("RUNNERLOOM_TASK_RESULT_END ")) {
+		return core.TaskResult{}, errors.New("no result in the serial log")
+	}
 	lines := strings.Split(string(log), "\n")
 	for i := len(lines) - 1; i >= 0; i-- {
 		m := taskEnd.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
@@ -215,7 +230,7 @@ func (l *Libvirt) TaskReports(ctx context.Context) ([]TaskUpload, error) {
 	if e != nil {
 		return nil, e
 	}
-	out := []TaskUpload{}
+	finals, progress := []TaskUpload{}, []TaskUpload{}
 	for _, entry := range entries {
 		id, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || !core.ValidID(id) {
@@ -229,6 +244,13 @@ func (l *Libvirt) TaskReports(ctx context.Context) ([]TaskUpload, error) {
 			continue
 		}
 		if _, e = os.Lstat(l.taskMarker(id)); e == nil {
+			// The result is acknowledged; once the VM is deleted its serial
+			// log (agent output, patch) has no further use on this Node.
+			if m.Phase == "deleted" {
+				if e = os.Remove(filepath.Join(l.StateDir, "logs", id+".log")); e != nil && !os.IsNotExist(e) {
+					return nil, e
+				}
+			}
 			continue
 		} else if !os.IsNotExist(e) {
 			return nil, e
@@ -245,7 +267,7 @@ func (l *Libvirt) TaskReports(ctx context.Context) ([]TaskUpload, error) {
 				r = boundResult(r)
 				r.Status = "no-result"
 			}
-			out = append(out, TaskUpload{Task: m.Instance.Task, Report: core.TaskReport{Instance: id, Result: &r}})
+			finals = append(finals, TaskUpload{Task: m.Instance.Task, Report: core.TaskReport{Instance: id, Result: &r}})
 		case "running", "start-issued":
 			if l.progress == nil {
 				l.progress = map[string]time.Time{}
@@ -258,11 +280,12 @@ func (l *Libvirt) TaskReports(ctx context.Context) ([]TaskUpload, error) {
 				return nil, e
 			}
 			if text := progressText(log); text != "" {
-				out = append(out, TaskUpload{Task: m.Instance.Task, Report: core.TaskReport{Instance: id, Progress: text}})
+				progress = append(progress, TaskUpload{Task: m.Instance.Task, Report: core.TaskReport{Instance: id, Progress: text}})
 			}
 		}
 	}
-	return out, nil
+	// Final results first: progress must never crowd them out of a Step.
+	return append(finals, progress...), nil
 }
 
 // TaskReported records a delivered report. A final result is marked on disk
