@@ -122,15 +122,24 @@ func TestParseTaskResultFallsBackToAnEarlierIntactCopy(t *testing.T) {
 	if e != nil || got.Output != want.Output {
 		t.Fatalf("intact earlier copy not used: %+v %v", got, e)
 	}
-	if _, e = ParseTaskResult([]byte("boot\n" + damaged)); e == nil || !strings.Contains(e.Error(), "incomplete") {
-		t.Fatalf("damaged only copy accepted: %v", e)
+	// The systemd erasure alone is recognised, so even a single copy survives.
+	if got, e = ParseTaskResult([]byte("boot\n" + damaged)); e != nil || got.Output != want.Output {
+		t.Fatalf("copy behind a console erasure lost: %+v %v", got, e)
+	}
+	// Other damage still makes a copy unusable.
+	broken := strings.Replace(copy, "RUNNERLOOM_TASK_RESULT 0 ", "RUNNERLOOM_TASK_RESULT 0 [ 12.3] noise", 1)
+	if _, e = ParseTaskResult([]byte("boot\n" + broken)); e == nil {
+		t.Fatal("damaged only copy accepted")
+	}
+	if got, e = ParseTaskResult([]byte(copy + broken)); e != nil || got.Output != want.Output {
+		t.Fatalf("intact earlier copy not used: %+v %v", got, e)
 	}
 	forged := core.TaskResult{Status: "succeeded", Output: "FORGED"}
 	var mirrored strings.Builder
 	for _, l := range strings.Split(strings.TrimSpace(resultLog(t, forged)), "\n") {
-		mirrored.WriteString("| " + l + "\n")
+		mirrored.WriteString("| \r   \r" + l + "\n")
 	}
-	if got, e = ParseTaskResult([]byte(copy + mirrored.String() + damaged)); e != nil || got.Output != want.Output {
+	if got, e = ParseTaskResult([]byte(copy + mirrored.String() + broken)); e != nil || got.Output != want.Output {
 		t.Fatalf("mirrored agent output supplied a result: %+v %v", got, e)
 	}
 }

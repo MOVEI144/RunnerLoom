@@ -83,7 +83,7 @@ func ParseTaskResult(log []byte) (core.TaskResult, error) {
 	lines := strings.Split(string(log), "\n")
 	var last error
 	for i := len(lines) - 1; i >= 0; i-- {
-		m := taskEnd.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
+		m := taskEnd.FindStringSubmatch(consoleLine(lines[i]))
 		if m == nil {
 			continue
 		}
@@ -101,6 +101,18 @@ func ParseTaskResult(log []byte) (core.TaskResult, error) {
 	return core.TaskResult{}, last
 }
 
+// consoleLine removes the trailing CR of a serial line and a leading run of
+// CRs and spaces: systemd erases its transient status line that way on the
+// same console. A mirrored agent line always starts with "| ", so this never
+// turns agent output into a runner line.
+func consoleLine(s string) string {
+	s = strings.TrimRight(s, "\r")
+	if strings.HasPrefix(s, "\r") {
+		s = strings.TrimLeft(s, "\r ")
+	}
+	return s
+}
+
 // taskResultCopy decodes the chunks printed just before one END line.
 func taskResultCopy(lines []string, m []string) (core.TaskResult, error) {
 	n, _ := strconv.Atoi(m[1])
@@ -110,7 +122,7 @@ func taskResultCopy(lines []string, m []string) (core.TaskResult, error) {
 	chunks := make([]string, n)
 	found := 0
 	for j := len(lines) - 1; j >= 0 && found < n; j-- {
-		line := strings.TrimRight(lines[j], "\r")
+		line := consoleLine(lines[j])
 		c := taskChunk.FindStringSubmatch(line)
 		if c == nil {
 			if taskEnd.MatchString(line) {
@@ -227,7 +239,7 @@ func (l *Libvirt) readLog(id string, limit int64) ([]byte, error) {
 func progressText(log []byte) string {
 	out := []string{}
 	for _, line := range strings.Split(string(log), "\n") {
-		line = strings.TrimRight(line, "\r")
+		line = consoleLine(line)
 		switch {
 		case strings.HasPrefix(line, "| "):
 			out = append(out, line[2:])
