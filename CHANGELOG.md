@@ -14,6 +14,7 @@ Sixth Linux/amd64 CPU/LAN release candidate. Adds agent tasks: a self-hosted "cl
 - Place queued tasks first-in first-out per Pool, refuse to start a task VM with under 10 minutes left, and require task Pools to allow at least 30 minutes.
 - Allow a tasks-only cluster without a `github` section; the GitHub manager starts only when a GitHub Pool exists.
 - Add `smoke-vm --task`, which runs the real guest runner in a real VM, and run it in CI.
+- Print the task result several times and accept the newest intact copy, so console status output from systemd cannot lose a result. The guest turns off systemd's console status output and drains the serial port before powering off.
 - Publish macOS (arm64 and amd64) task-client archives. Windows clients are not provided.
 - Database schema version 3, which adds the `clients` and `tasks` tables. Older binaries refuse this database.
 

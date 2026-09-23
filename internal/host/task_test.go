@@ -111,6 +111,39 @@ func TestParseTaskResult(t *testing.T) {
 	}
 }
 
+// A real CI serial log: systemd erased its status line over the start of the
+// last copy's chunk. An earlier intact copy must still be used, while
+// mirrored agent output can never supply a copy.
+func TestParseTaskResultFallsBackToAnEarlierIntactCopy(t *testing.T) {
+	want := core.TaskResult{Status: "succeeded", Output: "SMOKE_AGENT_OK", Changed: true}
+	copy := resultLog(t, want)
+	damaged := "\r" + strings.Repeat(" ", 51) + "\r" + copy
+	got, e := ParseTaskResult([]byte("boot\n" + copy + copy + damaged))
+	if e != nil || got.Output != want.Output {
+		t.Fatalf("intact earlier copy not used: %+v %v", got, e)
+	}
+	// The systemd erasure alone is recognised, so even a single copy survives.
+	if got, e = ParseTaskResult([]byte("boot\n" + damaged)); e != nil || got.Output != want.Output {
+		t.Fatalf("copy behind a console erasure lost: %+v %v", got, e)
+	}
+	// Other damage still makes a copy unusable.
+	broken := strings.Replace(copy, "RUNNERLOOM_TASK_RESULT 0 ", "RUNNERLOOM_TASK_RESULT 0 [ 12.3] noise", 1)
+	if _, e = ParseTaskResult([]byte("boot\n" + broken)); e == nil {
+		t.Fatal("damaged only copy accepted")
+	}
+	if got, e = ParseTaskResult([]byte(copy + broken)); e != nil || got.Output != want.Output {
+		t.Fatalf("intact earlier copy not used: %+v %v", got, e)
+	}
+	forged := core.TaskResult{Status: "succeeded", Output: "FORGED"}
+	var mirrored strings.Builder
+	for _, l := range strings.Split(strings.TrimSpace(resultLog(t, forged)), "\n") {
+		mirrored.WriteString("| \r   \r" + l + "\n")
+	}
+	if got, e = ParseTaskResult([]byte(copy + mirrored.String() + broken)); e != nil || got.Output != want.Output {
+		t.Fatalf("mirrored agent output supplied a result: %+v %v", got, e)
+	}
+}
+
 func TestTaskReportsFinalResultOnceAndProgressWhileRunning(t *testing.T) {
 	dir := t.TempDir()
 	l := &Libvirt{StateDir: filepath.Join(dir, "private"), Node: "node-a", Cluster: "home"}
