@@ -259,11 +259,14 @@
         },
         "enabled": {
           "type": "boolean"
+        },
+        "tasks": {
+          "type": "boolean",
+          "description": "true: this Pool serves agent tasks from approved clients (runnerloom task / MCP) and is never bound to a GitHub scale set. runnerName is optional and warmIdle must be 0."
         }
       },
       "required": [
         "name",
-        "runnerName",
         "image",
         "vcpu",
         "memoryMiB",
@@ -272,6 +275,32 @@
         "diskOverheadGiB",
         "maxRunners",
         "executionMinutes"
+      ],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "tasks": {
+                "const": true
+              }
+            },
+            "required": [
+              "tasks"
+            ]
+          },
+          "then": {
+            "properties": {
+              "warmIdle": {
+                "const": 0
+              }
+            }
+          },
+          "else": {
+            "required": [
+              "runnerName"
+            ]
+          }
+        }
       ]
     },
     "reservation": {

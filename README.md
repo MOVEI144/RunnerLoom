@@ -29,6 +29,7 @@ Workflow  (runs-on: Poolの runnerName)
 - Workflow は CPU 数を書きません。管理者が決めた Pool を `runs-on` で選びます。
 - GitHub 上で Job が success でも、VM の CPU / RAM / ディスクは **ホストが消したと確認するまで** 返しません。
 - CLI を入れただけでは、service は起動せず、ネットワークも変わりません。
+- 同じ VM の仕組みで、MCP・Claude Code プラグインから **コーディングエージェントのタスク** も実行できます（codex / claude / opencode / pi / gemini など。PC のログイン情報を持ち込み、結果はブランチ・draft PR で返る）。[AGENT_TASKS.ja.md](docs/AGENT_TASKS.ja.md)
 
 ```yaml
 jobs:
@@ -43,6 +44,7 @@ jobs:
 | やりたいこと | 読む場所 |
 |---|---|
 | 1台で最初の Job まで | 下の「1台で動かす」→ 全文は [QUICKSTART.ja.md](docs/QUICKSTART.ja.md) |
+| Claude Code・Codex・ChatGPT から長い作業を VM のエージェントに任せたい | [AGENT_TASKS.ja.md](docs/AGENT_TASKS.ja.md) |
 | 端末メニューで操作したい | [INTERACTIVE_CLI.ja.md](docs/INTERACTIVE_CLI.ja.md) |
 | CLI の入れ方・更新・削除 | [INSTALL.md](docs/INSTALL.md) |
 | `github check` などが落ちる | [TROUBLESHOOTING.ja.md](docs/TROUBLESHOOTING.ja.md) |
@@ -220,6 +222,8 @@ GitHub 側が success でも、VM が `Deleted` になり保持資源が 0 に�
 | `network apply` | RunnerLoom 専用の libvirt 網と firewall だけ |
 | `service install --start` | systemd unit を作って起動 |
 | 実 GitHub Job | その Job の VM と作業ディスク。終わったら所有確認して削除 |
+| `client init` / `client install` / `client allow`（PC） | PC のクライアント設定ディレクトリだけ。何も送信しない |
+| `task start`・MCP の `runnerloom_start_task` | 許可したエージェントの認証情報を VM へ送り、タスク用 Pool に VM を 1 台作る。push 先は指定した作業ブランチ |
 
 ## よくある詰まり
 

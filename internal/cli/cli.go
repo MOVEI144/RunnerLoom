@@ -414,6 +414,7 @@ func (a *App) Command() *cobra.Command {
 			workers++
 			go func() { errs <- manager.Run(ctx) }()
 		}
+		go server.RunTaskDispatcher(ctx, slog.New(slog.NewJSONHandler(a.Err, nil)))
 		go func() { errs <- server.Serve(ctx, listen, advertise) }()
 		e = <-errs
 		cancel()
@@ -576,6 +577,7 @@ func (a *App) Command() *cobra.Command {
 	a.addSetup(root)
 	a.addService(root)
 	a.addSmoke(root)
+	a.addTasks(root)
 	return root
 }
 func Run(ctx context.Context, args []string, in io.Reader, out, errout io.Writer) int {

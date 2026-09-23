@@ -223,7 +223,7 @@ func (s *Store) init() error {
 	if e := s.DB.QueryRow("PRAGMA user_version").Scan(&version); e != nil {
 		return e
 	}
-	if version > 2 {
+	if version > 3 {
 		return errors.New("database was created by a newer RunnerLoom")
 	}
 	_, e := s.DB.Exec(`CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL,payload BLOB NOT NULL);
@@ -235,7 +235,9 @@ func (s *Store) init() error {
  CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,at INTEGER NOT NULL,event TEXT NOT NULL,target TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS invites(id TEXT PRIMARY KEY,hash TEXT NOT NULL,expires INTEGER NOT NULL,used INTEGER NOT NULL DEFAULT 0,revoked INTEGER NOT NULL DEFAULT 0);
  CREATE TABLE IF NOT EXISTS enrollments(id TEXT PRIMARY KEY,invite TEXT NOT NULL UNIQUE,name TEXT NOT NULL,csr BLOB NOT NULL,ceiling BLOB NOT NULL,status TEXT NOT NULL,certificate BLOB);
- CREATE TABLE IF NOT EXISTS identities(name TEXT PRIMARY KEY,certificate_hash TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);`)
+ CREATE TABLE IF NOT EXISTS identities(name TEXT PRIMARY KEY,certificate_hash TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS clients(name TEXT PRIMARY KEY,certificate_hash TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY,client TEXT NOT NULL,request TEXT NOT NULL,created INTEGER NOT NULL,payload BLOB NOT NULL,secret BLOB,result BLOB,progress BLOB,UNIQUE(client,request));`)
 	if e != nil {
 		return e
 	}
@@ -248,7 +250,7 @@ func (s *Store) init() error {
 			return e
 		}
 	}
-	_, e = s.DB.Exec(`PRAGMA user_version=2`)
+	_, e = s.DB.Exec(`PRAGMA user_version=3`)
 	return e
 }
 func (s *Store) transaction(ctx context.Context, fn func(*sql.Tx) error) error {
@@ -686,17 +688,13 @@ func (s *Store) Allocate(ctx context.Context, request, pool string) (out Instanc
 		if !ok {
 			return Fail("POOL_NOT_FOUND", "Poolがありません", nil)
 		}
-		obs, e := readNodes(ctx, tx)
+		if p.Tasks {
+			return Fail("TASK_POOL", "タスク用PoolにはGitHub Runnerを割り当てません", pool)
+		}
+		out, e = s.placeTx(ctx, tx, c, runs, request, p)
 		if e != nil {
 			return e
 		}
-		rows := candidates(c, p, runs, obs, s.Now())
-		if len(rows) == 0 || len(rows[0].Reasons) > 0 {
-			return Fail("NO_CAPACITY", "現在配置できるNodeがありません", rows)
-		}
-		im, _ := c.Image(p.Image)
-		now := s.Now().UTC()
-		out = Instance{ID: ID(), RequestID: request, Node: rows[0].Node, Pool: p, Image: im, State: "Reserved", Reservation: rows[0].Reservation, Held: p.Charge(), Created: now, Updated: now, Deadline: now.Add(time.Duration(p.ExecutionMinutes+10) * time.Minute)}
 		b, _ := json.Marshal(out)
 		_, e = tx.ExecContext(ctx, "INSERT INTO instances(id,request,payload) VALUES(?,?,?)", out.ID, request, b)
 		return e
@@ -797,6 +795,11 @@ func (s *Store) Sync(ctx context.Context, name string, o Observation) (response 
 					if _, e = tx.ExecContext(ctx, "UPDATE instances SET jit=NULL WHERE id=?", a.ID); e != nil {
 						return e
 					}
+					if a.Task != "" {
+						if _, e = tx.ExecContext(ctx, "UPDATE tasks SET secret=NULL WHERE id=?", a.Task); e != nil {
+							return e
+						}
+					}
 				case "Failed":
 					a.State = "Stopping"
 				case "Unknown": // retain every commitment and phase
@@ -842,12 +845,27 @@ func (s *Store) Sync(ctx context.Context, name string, o Observation) (response 
 			}
 			return pending[i].Instance.ID < pending[j].Instance.ID
 		})
+		// A task payload can be hundreds of KiB. Keep each reply well below the
+		// Node's 1 MiB decode limit; deferred commands are resent next cycle.
+		budget := 900 << 10
 		for _, item := range pending {
 			if len(response.Commands) >= 4 {
 				break
 			}
 			jit := ""
-			if item.Action == "ensure" {
+			var task *TaskPayload
+			size := 4096
+			if item.Action == "ensure" && item.Instance.Task != "" {
+				task, e = s.taskPayloadTx(ctx, tx, item.Instance)
+				if e != nil {
+					return e
+				}
+				if task == nil {
+					continue
+				}
+				b, _ := json.Marshal(task)
+				size += len(b)
+			} else if item.Action == "ensure" {
 				var encrypted []byte
 				if e = tx.QueryRowContext(ctx, "SELECT jit FROM instances WHERE id=?", item.Instance.ID).Scan(&encrypted); e != nil {
 					return e
@@ -856,8 +874,13 @@ func (s *Store) Sync(ctx context.Context, name string, o Observation) (response 
 				if e != nil {
 					return e
 				}
+				size += len(jit)
 			}
-			response.Commands = append(response.Commands, Command{Instance: item.Instance, Action: item.Action, JIT: jit})
+			if size > budget && len(response.Commands) > 0 {
+				continue
+			}
+			budget -= size
+			response.Commands = append(response.Commands, Command{Instance: item.Instance, Action: item.Action, JIT: jit, Task: task})
 		}
 		return nil
 	})

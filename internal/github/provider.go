@@ -548,7 +548,8 @@ func (m *Manager) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	defer func() { cancel(); wg.Wait() }()
 	for _, p := range m.Config.Pools {
-		if !p.Enabled {
+		// Task Pools are served by approved clients, never by a scale set.
+		if !p.Enabled || p.Tasks {
 			continue
 		}
 		b, e := m.bind(ctx, p)

@@ -1,0 +1,285 @@
+package host
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	_ "embed"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/MOVEI144/RunnerLoom/internal/core"
+)
+
+//go:embed task-runner.py
+var taskRunnerScript string
+
+// taskDocument is written to the guest only. timeoutSeconds is derived from
+// the Controller deadline when the seed is built, like the runner timeout.
+type taskDocument struct {
+	ID             string        `json:"id"`
+	Title          string        `json:"title"`
+	TimeoutSeconds int64         `json:"timeoutSeconds"`
+	Spec           core.TaskSpec `json:"spec"`
+}
+
+func taskCloudConfig(a core.Instance, p core.TaskPayload) []byte {
+	doc := taskDocument{ID: p.ID, Title: core.TaskTitle(p.Spec.Prompt), TimeoutSeconds: max(int64(60), a.Deadline.Unix()-time.Now().Unix()-300), Spec: p.Spec}
+	b, _ := json.Marshal(doc)
+	// JSON string scalars are also valid YAML scalars. No interpolation can add YAML keys.
+	quote := func(s string) string { v, _ := json.Marshal(s); return string(v) }
+	return []byte("#cloud-config\nbootcmd:\n  - [systemctl, mask, --now, serial-getty@ttyS0.service]\n  - [systemctl, mask, --now, ssh.service, ssh.socket]\nssh_pwauth: false\ndisable_root: true\nusers:\n  - name: runner\n    lock_passwd: true\n    shell: /bin/bash\n    sudo: ['ALL=(ALL) NOPASSWD:ALL']\nwrite_files:\n  - path: /run/runnerloom-task.json\n    permissions: '0600'\n    content: " + quote(string(b)) + "\n  - path: /usr/local/sbin/runnerloom-task\n    permissions: '0700'\n    content: " + quote(taskRunnerScript) + "\nruncmd:\n  - [bash, -c, 'exec /usr/bin/python3 /usr/local/sbin/runnerloom-task >/dev/ttyS0 2>&1']\n")
+}
+
+// EnsureTask boots a disposable VM for one agent task. It shares every
+// ownership, capacity, image and start-intent rule of a GitHub runner VM.
+func (l *Libvirt) EnsureTask(ctx context.Context, a core.Instance, p core.TaskPayload) error {
+	if a.Task == "" || p.ID != a.Task || !a.Pool.Tasks {
+		return errors.New("task payload does not match its instance")
+	}
+	if e := p.Spec.Validate(); e != nil {
+		return e
+	}
+	b, _ := json.Marshal(p)
+	return l.ensure(ctx, a, job{secret: string(b), kind: "task", userData: func() []byte { return taskCloudConfig(a, p) }})
+}
+
+var taskChunk = regexp.MustCompile(`^RUNNERLOOM_TASK_RESULT ([0-9]{1,5}) ([A-Za-z0-9+/=]*)$`)
+var taskEnd = regexp.MustCompile(`^RUNNERLOOM_TASK_RESULT_END ([0-9]{1,5}) ([a-f0-9]{64})$`)
+
+// ParseTaskResult extracts the last complete result from a guest serial log.
+// The guest is untrusted: a missing, partial or mismatched result is reported
+// as such and never changes VM ownership or lifecycle.
+func ParseTaskResult(log []byte) (core.TaskResult, error) {
+	lines := strings.Split(string(log), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		m := taskEnd.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
+		if m == nil {
+			continue
+		}
+		n, _ := strconv.Atoi(m[1])
+		if n < 1 || n > 16384 {
+			return core.TaskResult{}, errors.New("invalid result chunk count")
+		}
+		chunks := make([]string, n)
+		found := 0
+		for j := i - 1; j >= 0 && found < n; j-- {
+			c := taskChunk.FindStringSubmatch(strings.TrimRight(lines[j], "\r"))
+			if c == nil {
+				if taskEnd.MatchString(strings.TrimRight(lines[j], "\r")) {
+					break
+				}
+				continue
+			}
+			k, _ := strconv.Atoi(c[1])
+			if k >= n || chunks[k] != "" || len(c[2]) == 0 || len(c[2]) > 1024 {
+				continue
+			}
+			chunks[k] = c[2]
+			found++
+		}
+		if found != n {
+			return core.TaskResult{}, errors.New("result chunks are incomplete")
+		}
+		data, e := base64.StdEncoding.DecodeString(strings.Join(chunks, ""))
+		if e != nil {
+			return core.TaskResult{}, errors.New("result encoding is corrupt")
+		}
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) != m[2] {
+			return core.TaskResult{}, errors.New("result digest mismatch")
+		}
+		var r core.TaskResult
+		d := json.NewDecoder(bytes.NewReader(data))
+		if e = d.Decode(&r); e != nil {
+			return core.TaskResult{}, errors.New("result document is invalid")
+		}
+		return boundResult(r), nil
+	}
+	return core.TaskResult{}, errors.New("no result in the serial log")
+}
+
+func tailString(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return strings.ToValidUTF8(s[len(s)-n:], "")
+}
+
+// boundResult coerces a guest document into the Controller's limits.
+func boundResult(r core.TaskResult) core.TaskResult {
+	if r.Status != "succeeded" && r.Status != "failed" {
+		r.Status = "failed"
+	}
+	r.Error = tailString(r.Error, 4096)
+	if len(r.Output) > core.MaxTaskOutput {
+		r.Output, r.Truncated = tailString(r.Output, core.MaxTaskOutput), true
+	}
+	r.DiffStat = tailString(r.DiffStat, 16<<10)
+	if len(r.Patch) > core.MaxTaskPatch {
+		r.Patch, r.Truncated = "", true
+	}
+	if r.Branch != "" && !core.ValidGitRef(r.Branch) {
+		r.Branch = ""
+	}
+	if r.Validate() != nil {
+		r.Commit, r.PullRequestURL = "", ""
+	}
+	for {
+		b, _ := json.Marshal(core.TaskReport{Instance: strings.Repeat("0", 32), Result: &r})
+		if len(b) <= core.MaxTaskReport {
+			break
+		}
+		if r.Patch != "" {
+			r.Patch, r.Truncated = "", true
+			continue
+		}
+		r.Output, r.Truncated = tailString(r.Output, len(r.Output)/2), true
+	}
+	return r
+}
+
+// TaskUpload is one report the Agent sends for a local task VM.
+type TaskUpload struct {
+	Task   string
+	Report core.TaskReport
+}
+
+func (l *Libvirt) taskMarker(id string) string {
+	return filepath.Join(l.StateDir, "task-reports", id+".sent")
+}
+
+// readLog opens only the owner-only serial log of an owned VM, refusing
+// symlinks, and returns at most the last limit bytes.
+func (l *Libvirt) readLog(id string, limit int64) ([]byte, error) {
+	if !core.ValidID(id) {
+		return nil, errors.New("invalid VM ID")
+	}
+	path := filepath.Join(l.StateDir, "logs", id+".log")
+	fd, e := syscall.Open(path, syscall.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0)
+	if e != nil {
+		if errors.Is(e, syscall.ENOENT) {
+			return nil, nil
+		}
+		return nil, e
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	st, e := f.Stat()
+	if e != nil || !st.Mode().IsRegular() {
+		return nil, errors.New("unsafe serial log")
+	}
+	if st.Size() > limit {
+		if _, e = f.Seek(st.Size()-limit, io.SeekStart); e != nil {
+			return nil, e
+		}
+	}
+	return io.ReadAll(io.LimitReader(f, limit))
+}
+
+// progressText keeps the agent's mirrored output and the runner's status
+// lines, dropping kernel noise and result chunks.
+func progressText(log []byte) string {
+	out := []string{}
+	for _, line := range strings.Split(string(log), "\n") {
+		line = strings.TrimRight(line, "\r")
+		switch {
+		case strings.HasPrefix(line, "| "):
+			out = append(out, line[2:])
+		case strings.HasPrefix(line, "RUNNERLOOM_TASK ") && !strings.HasPrefix(line, "RUNNERLOOM_TASK_RESULT"):
+			out = append(out, "["+strings.TrimPrefix(line, "RUNNERLOOM_TASK ")+"]")
+		}
+	}
+	return tailString(strings.ToValidUTF8(strings.Join(out, "\n"), ""), core.MaxTaskProgress)
+}
+
+// TaskReports returns the final result of every stopped task VM that has not
+// been acknowledged, and throttled progress for running ones.
+func (l *Libvirt) TaskReports(ctx context.Context) ([]TaskUpload, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entries, e := os.ReadDir(filepath.Join(l.StateDir, "instances"))
+	if os.IsNotExist(e) {
+		return nil, nil
+	}
+	if e != nil {
+		return nil, e
+	}
+	out := []TaskUpload{}
+	for _, entry := range entries {
+		id, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !core.ValidID(id) {
+			continue
+		}
+		m, e := l.load(id)
+		if e != nil {
+			return nil, e
+		}
+		if !m.Task || m.Instance.Task == "" {
+			continue
+		}
+		if _, e = os.Lstat(l.taskMarker(id)); e == nil {
+			continue
+		} else if !os.IsNotExist(e) {
+			return nil, e
+		}
+		switch m.Phase {
+		case "stopped", "deleted":
+			log, e := l.readLog(id, 16<<20)
+			if e != nil {
+				return nil, e
+			}
+			r, e := ParseTaskResult(log)
+			if e != nil {
+				r = core.TaskResult{Status: "no-result", ExitCode: -1, Error: "VMが結果を出さずに停止しました（時間切れ・停止指示・異常終了）: " + e.Error(), Output: progressText(log)}
+				r = boundResult(r)
+				r.Status = "no-result"
+			}
+			out = append(out, TaskUpload{Task: m.Instance.Task, Report: core.TaskReport{Instance: id, Result: &r}})
+		case "running", "start-issued":
+			if l.progress == nil {
+				l.progress = map[string]time.Time{}
+			}
+			if time.Since(l.progress[id]) < 30*time.Second {
+				continue
+			}
+			log, e := l.readLog(id, 256<<10)
+			if e != nil {
+				return nil, e
+			}
+			if text := progressText(log); text != "" {
+				out = append(out, TaskUpload{Task: m.Instance.Task, Report: core.TaskReport{Instance: id, Progress: text}})
+			}
+		}
+	}
+	return out, nil
+}
+
+// TaskReported records a delivered report. A final result is marked on disk
+// so that an Agent restart does not resend it.
+func (l *Libvirt) TaskReported(id string, final bool) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !core.ValidID(id) {
+		return errors.New("invalid VM ID")
+	}
+	if !final {
+		if l.progress == nil {
+			l.progress = map[string]time.Time{}
+		}
+		l.progress[id] = time.Now()
+		return nil
+	}
+	delete(l.progress, id)
+	return core.WritePrivate(l.taskMarker(id), []byte("sent\n"))
+}

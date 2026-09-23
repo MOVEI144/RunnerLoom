@@ -10,6 +10,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -68,6 +69,51 @@ func (s *Server) node(r *http.Request) (string, error) {
 	}
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: r.TLS.PeerCertificates[0].Raw})
 	return n, s.Store.AuthorizePeer(r.Context(), n, certPEM)
+}
+
+// client authenticates a task client. Node certificates carry a different URI
+// kind and are rejected here, just as client certificates cannot sync.
+func (s *Server) client(r *http.Request) (string, error) {
+	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 || len(r.TLS.PeerCertificates) == 0 {
+		return "", core.Fail("TLS_REQUIRED", "クライアント証明書が必要です", nil)
+	}
+	n, e := core.ClientIdentity(r.TLS.PeerCertificates[0], s.Cluster)
+	if e != nil {
+		return "", core.Fail("CLIENT_UNAUTHORIZED", "クライアントは未承認または失効済みです", nil)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: r.TLS.PeerCertificates[0].Raw})
+	return n, s.Store.AuthorizeClient(r.Context(), n, certPEM)
+}
+func taskStatus(err error) int {
+	var e *core.Error
+	if errors.As(err, &e) {
+		switch e.Code {
+		case "TASK_NOT_FOUND":
+			return 404
+		case "INVALID_TASK", "TASK_TOO_LARGE", "TASK_REPORT", "TASK_RESULT":
+			return 400
+		case "TASK_NOT_OWNED":
+			return 403
+		}
+	}
+	return 409
+}
+
+// RunTaskDispatcher places queued tasks when capacity appears. It is also
+// active in offline mode, where no GitHub listener runs.
+func (s *Server) RunTaskDispatcher(ctx context.Context, log *slog.Logger) {
+	t := time.NewTicker(3 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if _, e := s.Store.DispatchTasks(ctx); e != nil && ctx.Err() == nil && log != nil {
+				log.Warn("task placement deferred", "error", e.Error())
+			}
+		}
+	}
 }
 func (s *Server) allowEnrollment(ip string) bool {
 	s.mu.Lock()
@@ -165,6 +211,136 @@ func (s *Server) Handler() http.Handler {
 		}
 		if e = s.Store.UpdateIdentityCertificate(r.Context(), name, cert); e != nil {
 			failure(w, 500, e)
+			return
+		}
+		respond(w, 200, map[string]any{"certificate": cert})
+	})
+	mux.HandleFunc("POST /v1/tasks/{id}/report", func(w http.ResponseWriter, r *http.Request) {
+		name, e := s.node(r)
+		if e != nil {
+			failure(w, 403, e)
+			return
+		}
+		var q core.TaskReport
+		if !decode(w, r, &q) {
+			return
+		}
+		if e = s.Store.ReportTask(r.Context(), name, r.PathValue("id"), q); e != nil {
+			failure(w, taskStatus(e), e)
+			return
+		}
+		respond(w, 200, map[string]any{"accepted": true})
+	})
+	mux.HandleFunc("GET /v1/task-pools", func(w http.ResponseWriter, r *http.Request) {
+		if _, e := s.client(r); e != nil {
+			failure(w, 403, e)
+			return
+		}
+		pools, e := s.Store.TaskPools(r.Context())
+		if e != nil {
+			failure(w, 500, e)
+			return
+		}
+		out := []core.TaskPool{}
+		for _, p := range pools {
+			out = append(out, core.TaskPoolView(p))
+		}
+		respond(w, 200, map[string]any{"pools": out})
+	})
+	mux.HandleFunc("GET /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		name, e := s.client(r)
+		if e != nil {
+			failure(w, 403, e)
+			return
+		}
+		v, e := s.Store.Tasks(r.Context(), name, 50)
+		if e != nil {
+			failure(w, 500, e)
+			return
+		}
+		respond(w, 200, map[string]any{"tasks": v})
+	})
+	mux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
+		name, e := s.client(r)
+		if e != nil {
+			failure(w, 403, e)
+			return
+		}
+		var q core.TaskSpec
+		if !decode(w, r, &q) {
+			return
+		}
+		v, e := s.Store.SubmitTask(r.Context(), name, q)
+		if e != nil {
+			failure(w, taskStatus(e), e)
+			return
+		}
+		respond(w, 200, v)
+	})
+	mux.HandleFunc("GET /v1/tasks/{id}", func(w http.ResponseWriter, r *http.Request) {
+		name, e := s.client(r)
+		if e != nil {
+			failure(w, 403, e)
+			return
+		}
+		v, e := s.Store.Task(r.Context(), name, r.PathValue("id"), true)
+		if e != nil {
+			failure(w, taskStatus(e), e)
+			return
+		}
+		respond(w, 200, v)
+	})
+	mux.HandleFunc("POST /v1/tasks/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
+		name, e := s.client(r)
+		if e != nil {
+			failure(w, 403, e)
+			return
+		}
+		if e = s.Store.CancelTask(r.Context(), name, r.PathValue("id")); e != nil {
+			failure(w, taskStatus(e), e)
+			return
+		}
+		v, e := s.Store.Task(r.Context(), name, r.PathValue("id"), false)
+		if e != nil {
+			failure(w, taskStatus(e), e)
+			return
+		}
+		respond(w, 200, v)
+	})
+	mux.HandleFunc("POST /v1/client/renew", func(w http.ResponseWriter, r *http.Request) {
+		name, e := s.client(r)
+		if e != nil {
+			failure(w, 403, e)
+			return
+		}
+		var q struct {
+			CSR []byte `json:"csr"`
+		}
+		if !decode(w, r, &q) {
+			return
+		}
+		csr, e := core.ParseCSR(q.CSR)
+		if e != nil {
+			failure(w, 400, e)
+			return
+		}
+		pub, e := x509.MarshalPKIXPublicKey(csr.PublicKey)
+		if e != nil {
+			failure(w, 400, e)
+			return
+		}
+		old, e := x509.MarshalPKIXPublicKey(r.TLS.PeerCertificates[0].PublicKey)
+		if e != nil || core.Hash(pub) != core.Hash(old) {
+			failure(w, 403, core.Fail("KEY_MISMATCH", "自動更新では既存のクライアント鍵を使用してください", nil))
+			return
+		}
+		cert, e := s.CA.SignClient(q.CSR, s.Cluster, name)
+		if e != nil {
+			failure(w, 500, e)
+			return
+		}
+		if e = s.Store.UpdateClientCertificate(r.Context(), name, cert); e != nil {
+			failure(w, 403, e)
 			return
 		}
 		respond(w, 200, map[string]any{"certificate": cert})

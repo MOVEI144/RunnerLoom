@@ -19,6 +19,14 @@ The managed VM network allows public outbound access and the required DNS/DHCP s
 
 Outbound Internet access necessarily permits data exfiltration from a compromised job. The firewall is not a secrets-loss prevention product. Avoid attaching NAS shares or exposing internal production services to runner networks without a separate reviewed policy.
 
+## Agent tasks
+
+An approved task client can run arbitrary commands inside a disposable guest, as an allowed private-repository workflow can. It never receives a host command, and its VM is subject to the same network isolation, ceilings and deletion proof as runner VMs.
+
+Starting a task deliberately copies the chosen agent's local login (files and environment variables named by its profile) and, if allowed, a GitHub token into that guest. Assume that code in the guest, including the agent itself and anything it downloads, can read and send them over the outbound Internet. Only agents listed by the user with `runnerloom client allow` are sent; the MCP interface cannot change that list. A token refresh inside the guest may sign the PC out of that agent. Prefer long-lived tokens or API keys scoped for this use, and use a fine-grained GitHub token limited to the target repository with protected default branches.
+
+Task payloads are encrypted at rest with the master key and erased after confirmed deletion, queue expiry or cancellation before placement. Results and progress come from an untrusted guest. They are bounded, stored encrypted and shown only to the submitting client. The HTTP MCP transport listens on loopback only and requires a secret. Anyone with the tunnel URL that embeds that secret can start tasks with this PC's allowed credentials.
+
 ## Storage and cleanup
 
 Mutable VM disks are per-job. Backing images are SHA-256 verified and read-only. Image construction verifies Canonical signatures and the official runner archive digest. Images must be trusted; arbitrary user-supplied qcow2 files are not a safe file-upload format for a privileged service.

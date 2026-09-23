@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add agent tasks: approved task clients submit long-running coding tasks that run one agent CLI (claude, codex, opencode, pi, gemini, or profiles in `agents.json`) in a disposable VM on Pools marked `tasks: true`. Results come back as a pushed work branch, an optional draft PR, or a patch.
+- Add task-client identities (`client init/approve/install/allow/revoke`), with keys generated on the PC and a certificate URI kind separate from Nodes.
+- Add `runnerloom mcp serve` (stdio and loopback-only Streamable HTTP) for Claude Code, Codex, the ChatGPT desktop app and ChatGPT web through a tunnel. Add a Claude Code plugin and marketplace.
+- Encrypt task payloads at rest and erase them after confirmed deletion, queue expiry or early cancellation. Accept guest results only from the owning Node after host-confirmed shutdown.
+- Database schema version 3, which adds the `clients` and `tasks` tables. Older binaries refuse this database.
+
 ## 0.1.0-rc.5
 
 Fifth Linux/amd64 CPU/LAN release candidate.

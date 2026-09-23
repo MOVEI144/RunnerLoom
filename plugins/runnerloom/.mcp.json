@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "runnerloom": {
+      "command": "runnerloom",
+      "args": ["mcp", "serve"]
+    }
+  }
+}

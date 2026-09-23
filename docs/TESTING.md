@@ -82,6 +82,10 @@ not use macOS or Windows runners today.
 | `internal/cli` | Human CLI and `--json`, interactive mode on a TTY only, no secrets in output |
 | `internal/discovery` | Avahi records are untrusted hints |
 | `internal/e2e` | Real libvirt. GitHub side is a diagnostic fixture |
+| `internal/tasks` | Task-client identity files, allow list, credential collection (no symlinks, size limits) |
+| `internal/mcp` | MCP JSON-RPC over stdio and Streamable HTTP, tool errors, secret and Origin checks |
+
+Agent tasks are covered by `internal/core` (placement, encryption, erasure), `internal/control` (client → Controller → Agent over real mTLS with a fake hypervisor) and `internal/host`. The `internal/host` tests run the guest runner script against a local bare repository, without a VM or network. No test boots a task VM or runs a real agent CLI.
 
 Do not call the `control` integration tests a real-VM test. Real VMs are
 `real-vm`, `golden-image`, `e2e`, and `smoke-vm`.

@@ -101,6 +101,9 @@ type Pool struct {
 	NodeSelector     map[string]string `json:"nodeSelector,omitempty"`
 	NodeName         string            `json:"nodeName,omitempty"`
 	Enabled          bool              `json:"enabled"`
+	// Tasks marks a Pool that serves agent tasks from approved clients instead
+	// of a GitHub scale set. omitempty keeps existing Pool fingerprints stable.
+	Tasks bool `json:"tasks,omitempty"`
 }
 
 func (p Pool) Charge() Resources {
@@ -220,8 +223,15 @@ func (c Config) Validate() error {
 		key := "pools." + p.Name
 		check(ValidName(p.Name) && !pools[p.Name], key, "不正または重複したPool名です")
 		pools[p.Name] = true
-		check(ValidName(p.RunnerName) && !runnerNames[p.RunnerName], key+".runnerName", "不正または重複したGitHub選択名です")
-		runnerNames[p.RunnerName] = true
+		if p.Tasks {
+			check(p.RunnerName == "" || ValidName(p.RunnerName) && !runnerNames[p.RunnerName], key+".runnerName", "不正または重複したGitHub選択名です")
+			check(p.WarmIdle == 0, key+".warmIdle", "タスク用Poolは待機VMを持てません")
+		} else {
+			check(ValidName(p.RunnerName) && !runnerNames[p.RunnerName], key+".runnerName", "不正または重複したGitHub選択名です")
+		}
+		if p.RunnerName != "" {
+			runnerNames[p.RunnerName] = true
+		}
 		im, ok := c.Image(p.Image)
 		check(ok, key+".image", "Imageが存在しません")
 		check(p.VCPU >= 1 && p.VCPU <= 65536 && p.MemoryMiB >= 512 && p.MemoryMiB <= 1073741824 && p.OverheadMiB >= 512 && p.OverheadMiB <= 1048576, key+".size", "CPU・RAM・管理用余裕が範囲外です")
@@ -372,6 +382,9 @@ type Instance struct {
 	Deadline    time.Time `json:"deadline"`
 	Updated     time.Time `json:"updated"`
 	JITReady    bool      `json:"jitReady"`
+	// Task links an instance created for an agent task. JITReady then means
+	// that the encrypted task payload, not a GitHub JIT configuration, is ready.
+	Task string `json:"task,omitempty"`
 }
 
 func (a Instance) Name() string { return "rl-" + a.ID }
@@ -399,9 +412,10 @@ type VMReport struct {
 	Detail string `json:"detail,omitempty"`
 }
 type Command struct {
-	Instance Instance `json:"instance"`
-	Action   string   `json:"action"`
-	JIT      string   `json:"jit,omitempty"`
+	Instance Instance     `json:"instance"`
+	Action   string       `json:"action"`
+	JIT      string       `json:"jit,omitempty"`
+	Task     *TaskPayload `json:"task,omitempty"`
 }
 type SyncResponse struct {
 	Commands        []Command `json:"commands"`
@@ -429,6 +443,9 @@ func ValidateInstance(a Instance) error {
 		return errors.New("VM component size outside safe bounds")
 	}
 
+	if a.Task != "" && !ValidID(a.Task) {
+		return fmt.Errorf("invalid task link")
+	}
 	if !ValidID(a.ID) || !ValidName(a.Node) || !ValidName(a.Pool.Name) || !digestPattern.MatchString(a.Image.Digest) || !a.Pool.Charge().Valid() || a.Deadline.IsZero() {
 		return fmt.Errorf("invalid instance identity or resources")
 	}

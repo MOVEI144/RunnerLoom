@@ -42,12 +42,22 @@ type Libvirt struct {
 	Emulator        string
 	mu              sync.Mutex
 	consoles        map[string]net.Listener
+	progress        map[string]time.Time
 }
 type manifest struct {
 	Instance   core.Instance `json:"instance"`
 	Phase      string        `json:"phase"`
 	JITHash    string        `json:"jitHash"`
 	Diagnostic bool          `json:"diagnostic"`
+	Task       bool          `json:"task,omitempty"`
+}
+
+// job is the guest workload of one VM: a GitHub JIT runner, the local
+// diagnostic, or an agent task. secret binds the manifest to its content.
+type job struct {
+	secret   string
+	kind     string
+	userData func() []byte
 }
 
 func (l *Libvirt) Ready(ctx context.Context) error {
@@ -453,20 +463,29 @@ func (l *Libvirt) Close() error {
 	return nil
 }
 func (l *Libvirt) Ensure(ctx context.Context, a core.Instance, jit string) error {
-	return l.ensure(ctx, a, jit, false)
+	if a.Task != "" || a.Pool.Tasks {
+		return errors.New("task instances require a task payload")
+	}
+	return l.ensure(ctx, a, job{secret: jit, userData: func() []byte { return cloudConfig(a, jit, false) }})
 }
 
 // EnsureDiagnostic is a local-only fixed smoke test, never accepted in the node protocol.
 func (l *Libvirt) EnsureDiagnostic(ctx context.Context, a core.Instance) error {
-	return l.ensure(ctx, a, "diagnostic", true)
+	return l.ensure(ctx, a, job{secret: "diagnostic", kind: "diagnostic", userData: func() []byte { return cloudConfig(a, "diagnostic", true, l.DiagnosticProbe) }})
 }
-func (l *Libvirt) ensure(ctx context.Context, a core.Instance, jit string, diagnostic bool) error {
+func (l *Libvirt) ensure(ctx context.Context, a core.Instance, w job) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if e := core.ValidateInstance(a); e != nil {
 		return e
 	}
-	if a.Node != l.Node || !a.Pool.Charge().Fits(l.Ceiling) || len(jit) == 0 || len(jit) > 131072 {
+	limit := 131072
+	if w.kind == "task" {
+		limit = core.MaxTaskPayload + 4096
+	}
+	jit := w.secret
+	diagnostic := w.kind == "diagnostic"
+	if a.Node != l.Node || !a.Pool.Charge().Fits(l.Ceiling) || len(jit) == 0 || len(jit) > limit {
 		return errors.New("VM request exceeds local policy")
 	}
 	if a.Pool.VCPU < 1 || a.Pool.MemoryMiB < 512 || a.Pool.OverheadMiB < 512 || a.Pool.RootGiB < a.Image.MinimumRootGiB || a.Pool.ScratchGiB < 0 || a.Pool.DiskOverheadGiB < 1 {
@@ -474,7 +493,7 @@ func (l *Libvirt) ensure(ctx context.Context, a core.Instance, jit string, diagn
 	}
 	m, e := l.load(a.ID)
 	if e == nil {
-		if core.Fingerprint(m.Instance.Pool) != core.Fingerprint(a.Pool) || m.Instance.Image.Digest != a.Image.Digest || m.Instance.Node != a.Node || m.JITHash != core.Hash([]byte(jit)) || m.Diagnostic != diagnostic {
+		if core.Fingerprint(m.Instance.Pool) != core.Fingerprint(a.Pool) || m.Instance.Image.Digest != a.Image.Digest || m.Instance.Node != a.Node || m.JITHash != core.Hash([]byte(jit)) || m.Diagnostic != diagnostic || m.Task != (w.kind == "task") || m.Instance.Task != a.Task {
 			return errors.New("VM identity already bound to another request")
 		}
 		if m.Phase == "deleted" || m.Phase == "stopped" {
@@ -552,7 +571,7 @@ func (l *Libvirt) ensure(ctx context.Context, a core.Instance, jit string, diagn
 	if free < used.Disk+a.Pool.Charge().Disk+2 {
 		return errors.New("physical VM storage lacks the requested capacity and safety margin")
 	}
-	m = manifest{Instance: a, Phase: "prepared", JITHash: core.Hash([]byte(jit)), Diagnostic: diagnostic}
+	m = manifest{Instance: a, Phase: "prepared", JITHash: core.Hash([]byte(jit)), Diagnostic: diagnostic, Task: w.kind == "task"}
 	if e = l.save(m); e != nil {
 		return e
 	}
@@ -620,7 +639,7 @@ func (l *Libvirt) ensure(ctx context.Context, a core.Instance, jit string, diagn
 	if e = core.PrivateDir(private); e != nil {
 		return e
 	}
-	if e = core.WritePrivate(filepath.Join(private, "user-data"), cloudConfig(a, jit, diagnostic, l.DiagnosticProbe)); e != nil {
+	if e = core.WritePrivate(filepath.Join(private, "user-data"), w.userData()); e != nil {
 		return e
 	}
 	if e = core.WritePrivate(filepath.Join(private, "meta-data"), []byte("instance-id: "+a.ID+"\nlocal-hostname: "+a.Name()+"\n")); e != nil {
