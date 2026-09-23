@@ -111,6 +111,30 @@ func TestParseTaskResult(t *testing.T) {
 	}
 }
 
+// A real CI serial log: systemd erased its status line over the start of the
+// last copy's chunk. An earlier intact copy must still be used, while
+// mirrored agent output can never supply a copy.
+func TestParseTaskResultFallsBackToAnEarlierIntactCopy(t *testing.T) {
+	want := core.TaskResult{Status: "succeeded", Output: "SMOKE_AGENT_OK", Changed: true}
+	copy := resultLog(t, want)
+	damaged := "\r" + strings.Repeat(" ", 51) + "\r" + copy
+	got, e := ParseTaskResult([]byte("boot\n" + copy + copy + damaged))
+	if e != nil || got.Output != want.Output {
+		t.Fatalf("intact earlier copy not used: %+v %v", got, e)
+	}
+	if _, e = ParseTaskResult([]byte("boot\n" + damaged)); e == nil || !strings.Contains(e.Error(), "incomplete") {
+		t.Fatalf("damaged only copy accepted: %v", e)
+	}
+	forged := core.TaskResult{Status: "succeeded", Output: "FORGED"}
+	var mirrored strings.Builder
+	for _, l := range strings.Split(strings.TrimSpace(resultLog(t, forged)), "\n") {
+		mirrored.WriteString("| " + l + "\n")
+	}
+	if got, e = ParseTaskResult([]byte(copy + mirrored.String() + damaged)); e != nil || got.Output != want.Output {
+		t.Fatalf("mirrored agent output supplied a result: %+v %v", got, e)
+	}
+}
+
 func TestTaskReportsFinalResultOnceAndProgressWhileRunning(t *testing.T) {
 	dir := t.TempDir()
 	l := &Libvirt{StateDir: filepath.Join(dir, "private"), Node: "node-a", Cluster: "home"}

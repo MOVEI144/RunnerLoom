@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import termios
 import threading
 import time
 import urllib.error
@@ -52,7 +53,7 @@ DIFFSTAT_LIMIT = 16 << 10
 # well before that, leaving room for boot messages and repeated results.
 MIRROR_LIMIT = 10 << 20
 MIRROR_LINE = 2000
-CHUNK = 1024
+CHUNK = 512
 # The host stops the VM at the Controller deadline. The runner finishes a
 # margin earlier, and the agent a further reserve earlier so that commit,
 # push, pull request and result output always fit.
@@ -368,6 +369,13 @@ def main():
         work = os.path.join(HOME, 'work')
         if ACCOUNT is not None:
             subprocess.run(['dmesg', '-n', '1'], check=False)
+            # systemd's console status lines (and their \r erasures) would
+            # otherwise land inside result lines. The result is still printed
+            # more than once, because other writers cannot all be silenced.
+            try:
+                os.kill(1, signal.SIGRTMIN + 21)
+            except OSError:
+                pass
             if os.path.exists('/dev/vdb'):
                 run(['mkfs.ext4', '-q', '/dev/vdb'], {'PATH': SYSTEM_PATH}, as_user=False)
                 os.makedirs('/scratch', exist_ok=True)
@@ -522,6 +530,11 @@ def main():
             emit(result, mirror)
         finally:
             sys.stdout.flush()
+            try:
+                # Let the serial port transmit every copy before shutdown.
+                termios.tcdrain(sys.stdout.fileno())
+            except (OSError, ValueError, termios.error):
+                pass
             if POWEROFF:
                 subprocess.run(['sync'], check=False)
                 subprocess.run(['systemctl', 'poweroff', '--no-block'], check=False)

@@ -76,52 +76,72 @@ func ParseTaskResult(log []byte) (core.TaskResult, error) {
 	} else if !bytes.HasPrefix(log, []byte("RUNNERLOOM_TASK_RESULT_END ")) {
 		return core.TaskResult{}, errors.New("no result in the serial log")
 	}
+	// The guest prints the result several times because other console
+	// writers (systemd status, kernel) can corrupt a copy. The newest intact
+	// copy wins. Every such line is the runner's own: agent output is always
+	// mirrored behind "| ", so it cannot supply a copy.
 	lines := strings.Split(string(log), "\n")
+	var last error
 	for i := len(lines) - 1; i >= 0; i-- {
 		m := taskEnd.FindStringSubmatch(strings.TrimRight(lines[i], "\r"))
 		if m == nil {
 			continue
 		}
-		n, _ := strconv.Atoi(m[1])
-		if n < 1 || n > 16384 {
-			return core.TaskResult{}, errors.New("invalid result chunk count")
+		r, e := taskResultCopy(lines[:i], m)
+		if e == nil {
+			return r, nil
 		}
-		chunks := make([]string, n)
-		found := 0
-		for j := i - 1; j >= 0 && found < n; j-- {
-			c := taskChunk.FindStringSubmatch(strings.TrimRight(lines[j], "\r"))
-			if c == nil {
-				if taskEnd.MatchString(strings.TrimRight(lines[j], "\r")) {
-					break
-				}
-				continue
-			}
-			k, _ := strconv.Atoi(c[1])
-			if k >= n || chunks[k] != "" || len(c[2]) == 0 || len(c[2]) > 1024 {
-				continue
-			}
-			chunks[k] = c[2]
-			found++
+		if last == nil {
+			last = e
 		}
-		if found != n {
-			return core.TaskResult{}, errors.New("result chunks are incomplete")
-		}
-		data, e := base64.StdEncoding.DecodeString(strings.Join(chunks, ""))
-		if e != nil {
-			return core.TaskResult{}, errors.New("result encoding is corrupt")
-		}
-		sum := sha256.Sum256(data)
-		if hex.EncodeToString(sum[:]) != m[2] {
-			return core.TaskResult{}, errors.New("result digest mismatch")
-		}
-		var r core.TaskResult
-		d := json.NewDecoder(bytes.NewReader(data))
-		if e = d.Decode(&r); e != nil {
-			return core.TaskResult{}, errors.New("result document is invalid")
-		}
-		return boundResult(r), nil
 	}
-	return core.TaskResult{}, errors.New("no result in the serial log")
+	if last == nil {
+		last = errors.New("no result in the serial log")
+	}
+	return core.TaskResult{}, last
+}
+
+// taskResultCopy decodes the chunks printed just before one END line.
+func taskResultCopy(lines []string, m []string) (core.TaskResult, error) {
+	n, _ := strconv.Atoi(m[1])
+	if n < 1 || n > 16384 {
+		return core.TaskResult{}, errors.New("invalid result chunk count")
+	}
+	chunks := make([]string, n)
+	found := 0
+	for j := len(lines) - 1; j >= 0 && found < n; j-- {
+		line := strings.TrimRight(lines[j], "\r")
+		c := taskChunk.FindStringSubmatch(line)
+		if c == nil {
+			if taskEnd.MatchString(line) {
+				break
+			}
+			continue
+		}
+		k, _ := strconv.Atoi(c[1])
+		if k >= n || chunks[k] != "" || len(c[2]) == 0 || len(c[2]) > 1024 {
+			continue
+		}
+		chunks[k] = c[2]
+		found++
+	}
+	if found != n {
+		return core.TaskResult{}, errors.New("result chunks are incomplete")
+	}
+	data, e := base64.StdEncoding.DecodeString(strings.Join(chunks, ""))
+	if e != nil {
+		return core.TaskResult{}, errors.New("result encoding is corrupt")
+	}
+	sum := sha256.Sum256(data)
+	if hex.EncodeToString(sum[:]) != m[2] {
+		return core.TaskResult{}, errors.New("result digest mismatch")
+	}
+	var r core.TaskResult
+	d := json.NewDecoder(bytes.NewReader(data))
+	if e = d.Decode(&r); e != nil {
+		return core.TaskResult{}, errors.New("result document is invalid")
+	}
+	return boundResult(r), nil
 }
 
 func tailString(s string, n int) string {
