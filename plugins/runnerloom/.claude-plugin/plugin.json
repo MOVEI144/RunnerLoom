@@ -1,0 +1,12 @@
+{
+  "name": "runnerloom",
+  "version": "0.1.0-rc.6",
+  "description": "Delegate long-running coding tasks to agents in disposable RunnerLoom VMs on your own machines. Requires the runnerloom CLI on PATH and a registered task client (runnerloom client init/install/allow).",
+  "author": {
+    "name": "MOVEI144"
+  },
+  "homepage": "https://github.com/MOVEI144/RunnerLoom/blob/main/docs/AGENT_TASKS.ja.md",
+  "repository": "https://github.com/MOVEI144/RunnerLoom",
+  "license": "MIT",
+  "keywords": ["mcp", "vm", "cloud-agent", "codex", "claude-code", "self-hosted"]
+}

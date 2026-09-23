@@ -58,7 +58,7 @@ all succeeded on that same run.
 | Workflow | Job | When | Proves | Does not prove |
 |---|---|---|---|---|
 | RunnerLoom CI | Go, race, integration and CLI (`checks`) | Push to `main`, pull requests, manual | Units, concurrency, mTLS integration, fuzz, Debian package, shipped-binary vuln scan | Real KVM, a live GitHub job; `make check`'s `bash -n` |
-| RunnerLoom CI | Real Ubuntu VM lifecycle | After `checks`, on same-repo PRs and `main` | Signed base, boot, guest work, host-probe rejection, poweroff, owned disk deletion | Official-runner Golden Image, multiple nodes |
+| RunnerLoom CI | Real Ubuntu VM lifecycle | After `checks`, on same-repo PRs and `main` | Signed base, boot, guest work, host-probe rejection, poweroff, owned disk deletion; the agent-task guest runner (`smoke-vm --task`) | Official-runner Golden Image, multiple nodes, real agent CLIs |
 | RunnerLoom CI | Build verified runner image and boot it | After `checks`, on same-repo PRs and `main` | Unregistered Golden Image build, service masks, runner binary, smoke on that image | Home-host capacity or LAN isolation campaigns |
 | RunnerLoom runtime qualification | Build image, enroll Node, run two REAL VMs… | Push to `main` and manual | Two real libvirt VMs, enroll, cleanup | Live GitHub API, a home node |
 | RunnerLoom runtime qualification | Live GitHub prerequisites ONLY | Same as above | Whether dedicated secrets exist | Running a job |
@@ -82,6 +82,10 @@ not use macOS or Windows runners today.
 | `internal/cli` | Human CLI and `--json`, interactive mode on a TTY only, no secrets in output |
 | `internal/discovery` | Avahi records are untrusted hints |
 | `internal/e2e` | Real libvirt. GitHub side is a diagnostic fixture |
+| `internal/tasks` | Task-client identity files, allow list, credential collection (no symlinks, size limits) |
+| `internal/mcp` | MCP JSON-RPC over stdio and Streamable HTTP, tool errors, secret and Origin checks |
+
+Agent tasks are covered by `internal/core` (placement, encryption, erasure, revocation, state derivation), `internal/control` (client → Controller → Agent over real mTLS with a fake hypervisor), `internal/mcp` (JSON-RPC and HTTP transport) and `internal/host`. The `internal/host` tests run the real guest runner script against a local git server without a VM. The CI `real-vm` job also runs `smoke-vm --task`: the real guest runner in a real VM with a fixed shell agent, checking the user switch, no sudo, that the agent cannot read the token, a public github.com clone, a push refused for an invalid token, the returned patch and VM deletion. No test runs a real agent CLI or logs in to a real agent service.
 
 Do not call the `control` integration tests a real-VM test. Real VMs are
 `real-vm`, `golden-image`, `e2e`, and `smoke-vm`.

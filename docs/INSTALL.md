@@ -17,7 +17,7 @@
 | Package | Linux/amd64 archive または Debian package |
 | Status | Release candidate。実環境での受入試験が必要 |
 
-配布バイナリを使う場合、Goは不要です。Windows/macOSホスト、GPU passthrough、Controller HAはこの版の対象外です。
+配布バイナリを使う場合、Goは不要です。Windows/macOSホスト、GPU passthrough、Controller HAはこの版の対象外です。macOS向けの `darwin-arm64` / `darwin-amd64` アーカイブは、エージェントタスクを投げるPC用のクライアント（`client`・`task`・`mcp serve`）だけです（[AGENT_TASKS.ja.md](AGENT_TASKS.ja.md#macos-のpcから使う)）。
 
 ## インストール手順
 

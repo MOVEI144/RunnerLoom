@@ -19,6 +19,18 @@ The managed VM network allows public outbound access and the required DNS/DHCP s
 
 Outbound Internet access necessarily permits data exfiltration from a compromised job. The firewall is not a secrets-loss prevention product. Avoid attaching NAS shares or exposing internal production services to runner networks without a separate reviewed policy.
 
+## Agent tasks
+
+An approved task client can run arbitrary commands inside a disposable guest, as an allowed private-repository workflow can. It never receives a host command, and its VM is subject to the same network isolation, ceilings and deletion proof as runner VMs.
+
+Starting a task deliberately copies the chosen agent's local login (files and environment variables named by its profile) and, if allowed, a GitHub token into that guest. Assume that code in the guest, including the agent itself and anything it downloads, can read the agent's own login and send it over the outbound Internet: guest egress is **not** restricted beyond the runner-VM firewall above. Only agents listed by the user with `runnerloom client allow` are sent; the MCP interface cannot change that list, and a custom profile is pinned by digest when allowed, so a later edit is refused until allowed again. Well-known secret locations (SSH, GnuPG, cloud and container credentials, `gh`, `.netrc`, shell history and RunnerLoom's own client directory) are never read, whatever a profile says. A token refresh inside the guest may sign the PC out of that agent. Prefer long-lived tokens or API keys scoped for this use.
+
+The GitHub token is sent only for github.com repositories. In the guest the agent runs as the unprivileged runner user **without sudo**. The token is used for the clone before the agent starts, and afterwards only by root: the agent's work is committed as the runner user without secrets, every runner process is killed, and root fetches the commits into a separate clean repository with no agent-controlled configuration or hooks before pushing. A profile with `"sudo": true` gives the agent root and therefore the token; do not use it where the token matters. Use a fine-grained GitHub token limited to the target repository, and protect default branches: the token itself can write any branch it is permitted to.
+
+Task payloads are encrypted at rest with the master key and erased after confirmed deletion, queue expiry, cancellation before placement or client revocation. The task title (the start of the prompt) is kept in plaintext for listings. Results and progress come from an untrusted guest. They are bounded, stored encrypted, checked against the task's branch and repository, and shown only to the submitting client. A task VM's serial log is deleted once its result has been collected and the VM deleted. Revoking a client cancels its unfinished tasks and asks placed VMs to stop.
+
+Client enrollment pins the Cluster CA: the bundle is installed only when its CA fingerprint matches a value the administrator conveys separately, and the CSR fingerprint shown on the PC is checked before signing. The HTTP MCP transport listens on loopback only and requires a secret. Anyone with the tunnel URL that embeds that secret can start tasks with this PC's allowed credentials.
+
 ## Storage and cleanup
 
 Mutable VM disks are per-job. Backing images are SHA-256 verified and read-only. Image construction verifies Canonical signatures and the official runner archive digest. Images must be trusted; arbitrary user-supplied qcow2 files are not a safe file-upload format for a privileged service.

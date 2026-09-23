@@ -337,7 +337,7 @@ func localIdentity(ctx context.Context, s *core.Store, ca core.CA, c agent.Confi
 func (a *App) addSmoke(root *cobra.Command) {
 	var file, digest, nodeFile string
 	var timeout time.Duration
-	var tcg bool
+	var tcg, taskMode bool
 	cmd := add(root, "smoke-vm", "実VMで固定診断を実行し、停止・削除まで確認。既存VMには触れません", 0, func(c *cobra.Command, _ []string) error {
 		conf, e := agent.LoadConfig(nodeFile)
 		if e != nil {
@@ -345,6 +345,9 @@ func (a *App) addSmoke(root *cobra.Command) {
 		}
 		if timeout < time.Minute || timeout > 20*time.Minute {
 			return errors.New("timeoutは1〜20分です")
+		}
+		if taskMode && timeout < host.MinimumTaskTime+2*time.Minute {
+			return errors.New("--taskのtimeoutは12分以上にしてください")
 		}
 		lock, e := core.AcquireLock(conf.StateDir, "agent")
 		if e != nil {
@@ -408,7 +411,21 @@ func (a *App) addSmoke(root *cobra.Command) {
 			_ = p.Stop(cleanup, instance.ID)
 			_ = p.Delete(cleanup, instance.ID)
 		}()
-		if e = p.EnsureDiagnostic(ctx, instance); e != nil {
+		var payload core.TaskPayload
+		if taskMode {
+			// The real guest task runner with a fixed shell "agent": no model
+			// credentials, a public repository, and a deliberately invalid
+			// GitHub token so that the push fails and a patch is returned.
+			instance.Pool.Tasks, instance.Pool.RunnerName, instance.Task = true, "", core.ID()
+			payload = core.TaskPayload{ID: instance.Task, Spec: core.TaskSpec{RequestID: "smoke", Pool: "smoke", Prompt: "RunnerLoom task smoke",
+				Agent:      core.AgentProfile{Name: "smoke", Run: []string{"sh", "-c", taskSmokeAgent}},
+				Repository: "https://github.com/octocat/Hello-World.git", Branch: "runnerloom/smoke-" + instance.Task[:8], GitToken: taskSmokeToken,
+				Files: []core.TaskFile{{Path: ".smoke/credential", Content: []byte("SMOKE-FILE")}}, Env: map[string]string{"SMOKE_ENV": "visible"}}}
+			e = p.EnsureTask(ctx, instance, payload)
+		} else {
+			e = p.EnsureDiagnostic(ctx, instance)
+		}
+		if e != nil {
 			return e
 		}
 		for {
@@ -418,6 +435,9 @@ func (a *App) addSmoke(root *cobra.Command) {
 			}
 			for _, r := range reports {
 				if r.ID == instance.ID && r.State == "Stopped" {
+					if taskMode {
+						return a.checkTaskSmoke(ctx, p, conf, instance, mode)
+					}
 					log, e := core.ReadSecret(filepath.Join(conf.StateDir, "logs", instance.ID+".log"))
 					if e != nil {
 						return e
@@ -448,7 +468,62 @@ func (a *App) addSmoke(root *cobra.Command) {
 	cmd.Flags().StringVar(&digest, "digest", "", "期待するsha256:...")
 	cmd.Flags().DurationVar(&timeout, "timeout", 8*time.Minute, "VM診断の上限")
 	cmd.Flags().BoolVar(&tcg, "tcg", false, "KVMなしのソフトウェア仮想化。結果に明示します")
+	cmd.Flags().BoolVar(&taskMode, "task", false, "固定のシェル「エージェント」でエージェントタスクの実行経路を検証（github.comへの公開clone・push失敗を含む）")
 	_ = cmd.MarkFlagRequired("config")
 	_ = cmd.MarkFlagRequired("image")
 	_ = cmd.MarkFlagRequired("digest")
+}
+
+const taskSmokeToken = "runnerloom-smoke-invalid-token"
+
+// taskSmokeAgent runs as the guest agent user. It fails the task when the
+// agent could escalate or read the task's secrets, then leaves a background
+// writer behind to prove that leftovers cannot corrupt the result.
+const taskSmokeAgent = `set -e
+test "$(id -un)" = runner
+test "$(cat "$HOME/.smoke/credential")" = SMOKE-FILE
+test "$SMOKE_ENV" = visible
+test -z "$RUNNERLOOM_GIT_TOKEN"
+if sudo -n true 2>/dev/null; then echo SMOKE_SUDO_AVAILABLE; exit 10; fi
+for f in /var/lib/cloud/instance/user-data.txt /run/runnerloom-task.json /dev/sr0 /dev/sr1; do
+  if head -c 1 "$f" >/dev/null 2>&1; then echo "SMOKE_SECRET_READABLE $f"; exit 11; fi
+done
+if grep -rqs ` + taskSmokeToken + ` /var/lib/cloud /run /proc/[0-9]*/environ 2>/dev/null; then echo SMOKE_TOKEN_VISIBLE; exit 12; fi
+(while :; do echo smoke-background-writer; sleep 0.05; done) &
+echo "RunnerLoom task smoke" > SMOKE.txt
+echo SMOKE_AGENT_OK`
+
+// checkTaskSmoke verifies the result reported by the real guest runner.
+func (a *App) checkTaskSmoke(ctx context.Context, p *host.Libvirt, conf agent.Config, instance core.Instance, mode string) error {
+	uploads, e := p.TaskReports(ctx)
+	if e != nil {
+		return e
+	}
+	var result *core.TaskResult
+	for _, u := range uploads {
+		if u.Report.Instance == instance.ID && u.Report.Result != nil {
+			result = u.Report.Result
+		}
+	}
+	log, _ := core.ReadSecret(filepath.Join(conf.StateDir, "logs", instance.ID+".log"))
+	evidence := map[string]any{"realVM": true, "emulator": mode, "task": true, "instanceID": instance.ID, "result": result}
+	switch {
+	case result == nil:
+		return core.Fail("TASK_SMOKE", "タスクVMの結果がありません", evidence)
+	case result.Status != "succeeded" || !strings.Contains(result.Output, "SMOKE_AGENT_OK"):
+		return core.Fail("TASK_SMOKE", "タスクVMでエージェントが成功していません（隔離検査を含む）", evidence)
+	case !result.Changed || result.Pushed || !strings.Contains(result.Patch, "+RunnerLoom task smoke") || !strings.Contains(result.Error, "push failed"):
+		return core.Fail("TASK_SMOKE", "clone・commit・push失敗時のpatch返却を確認できません", evidence)
+	case bytes.Contains(log, []byte(taskSmokeToken)):
+		return core.Fail("TASK_SMOKE", "トークンがシリアルログに出ています", evidence)
+	}
+	if e = p.Delete(ctx, instance.ID); e != nil {
+		return e
+	}
+	summary := *result
+	summary.Patch = fmt.Sprintf("(%d bytes)", len(result.Patch))
+	evidence["result"] = summary
+	evidence["deleted"] = true
+	evidence["started"] = true
+	return a.output(evidence)
 }

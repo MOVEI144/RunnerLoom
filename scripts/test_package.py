@@ -9,6 +9,12 @@ for line in (root/'SHA256SUMS').read_text().splitlines():
     assert pathlib.Path(name).name==name,'unsafe checksum path'
     with (root/name).open('rb') as f:assert hashlib.file_digest(f,'sha256').hexdigest()==expected,name
 archives=list(root.glob('runnerloom-*-linux-amd64.tar.gz'));assert len(archives)==1
+for arch,magic in (('arm64',b'\xcf\xfa\xed\xfe'),('amd64',b'\xcf\xfa\xed\xfe')):
+    clients=list(root.glob(f'runnerloom-*-darwin-{arch}.tar.gz'));assert len(clients)==1,arch
+    with tarfile.open(clients[0]) as tar:
+        assert all(m.isfile() or m.isdir() for m in tar.getmembers()),'links not permitted'
+        member=next(m for m in tar.getmembers() if m.name.endswith('/runnerloom'))
+        assert member.mode==0o755 and tar.extractfile(member).read(4)==magic,'not a macOS executable'
 with tempfile.TemporaryDirectory() as tmp:
     with tarfile.open(archives[0]) as tar:
         assert all(m.isfile() or m.isdir() for m in tar.getmembers()),'links not permitted'

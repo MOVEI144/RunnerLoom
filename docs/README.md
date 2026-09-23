@@ -32,6 +32,7 @@
 | 検証済み範囲を確認する | [VERIFICATION.md](VERIFICATION.md) | mockと実VMの区別、合格済みCI、未検証領域 |
 | テストの意味を知る | [TESTING.md](TESTING.md) | Local commands, CI jobs, what a green check does not prove |
 | v1の残作業を見る | [V1_ACCEPTANCE.md](V1_ACCEPTANCE.md) | 実環境で必要な受入試験と証拠 |
+| VMのエージェントに作業を任せる | [AGENT_TASKS.ja.md](AGENT_TASKS.ja.md) | MCP・Claude Codeプラグイン・Codex・ChatGPT、PC登録、認証情報の許可、結果の受け取り |
 | 変更に参加する | [CONTRIBUTING.md](../CONTRIBUTING.md) | `make check`, self-review, required tests by change type, prohibitions |
 
 ## セットアップ文書の役割分担

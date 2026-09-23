@@ -403,7 +403,8 @@ func (a *App) Command() *cobra.Command {
 		defer cancel()
 		errs := make(chan error, 2)
 		workers := 1
-		if !offline {
+		// A tasks-only cluster has no scale set to listen to.
+		if !offline && conf.UsesGitHub() {
 			manager, e := gh.New(s, conf)
 			if e != nil {
 				return e
@@ -414,6 +415,7 @@ func (a *App) Command() *cobra.Command {
 			workers++
 			go func() { errs <- manager.Run(ctx) }()
 		}
+		go server.RunTaskDispatcher(ctx, slog.New(slog.NewJSONHandler(a.Err, nil)))
 		go func() { errs <- server.Serve(ctx, listen, advertise) }()
 		e = <-errs
 		cancel()
@@ -431,7 +433,7 @@ func (a *App) Command() *cobra.Command {
 	runController.Flags().StringVar(&listen, "listen", "127.0.0.1:8443", "明示的なLAN待受アドレス")
 	runController.Flags().StringVar(&advertise, "advertise", "https://127.0.0.1:8443", "Nodeに案内するURL")
 	runController.Flags().BoolVar(&discoverable, "discoverable", false, "AvahiでLAN上へ公開。発見は参加承認の代わりにはなりません")
-	runController.Flags().BoolVar(&offline, "offline", false, "GitHubへ接続せず参加受付だけを行う。テスト・初期設定用")
+	runController.Flags().BoolVar(&offline, "offline", false, "GitHubへ接続せず、Node参加受付とエージェントタスクだけを行う")
 	agentCmd := &cobra.Command{Use: "agent", Short: "実行Nodeの常駐サービス"}
 	root.AddCommand(agentCmd)
 	var agentFile string
@@ -576,6 +578,7 @@ func (a *App) Command() *cobra.Command {
 	a.addSetup(root)
 	a.addService(root)
 	a.addSmoke(root)
+	a.addTasks(root)
 	return root
 }
 func Run(ctx context.Context, args []string, in io.Reader, out, errout io.Writer) int {

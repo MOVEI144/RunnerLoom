@@ -70,6 +70,16 @@ Cache retirement is a separate local administrative operation. Applied pruning t
 
 `setup` saves configuration and identities, but does not pretend that network creation, external GitHub authorization or a test VM already succeeded. Each verification has its own command. systemd installation is explicit. Host package installation is documented, not silently performed.
 
+## Agent tasks
+
+A task client is a user's PC, not a Node. It holds a P-256 key generated locally. The administrator signs its CSR out of band with a separate URI kind (`.../client/<name>`), so a client certificate cannot synchronize VMs and a Node certificate cannot use the task API. Every request re-checks the client's certificate hash and revocation.
+
+A task is placed only on a Pool marked `tasks`. Such a Pool is never bound to a GitHub scale set, and GitHub allocation refuses it. Placement uses the same transactional ledger, reservations and candidate reasons as runner allocation, and creates an ordinary Instance with a `task` link. The task payload (prompt, the allowed agent's credential files and environment, an optional GitHub token) is encrypted with the master key. It is delivered only inside an `ensure` command to the owning Node, within a per-reply byte budget, and erased when the host confirms deletion, when queueing expires, when a task is cancelled before placement, or when its client is revoked. Task state is derived from the Instance rather than kept as a second lifecycle.
+
+The Node builds a task-specific cloud-init seed through the same `ensure` path (ownership, ceiling, image, start intent). The guest runner installs and runs one agent CLI as the unprivileged user, without sudo unless the profile opts in. The agent's work is committed as that user without secrets; every process of that user is then killed, and root fetches the commits into a separate clean repository and pushes the work branch with the GitHub token, which no agent-owned process sees. It optionally opens a draft pull request, and prints a chunked, SHA-256-checked result to the serial console before powering off. After the host observes shutdown, the Agent parses the bounded log and reports the result. The Controller accepts a result only from the owning Node, and only for an Instance in `Deleting` or `Deleted`. Guest output never changes VM ownership or resource accounting.
+
+The MCP server (`runnerloom mcp serve`) runs on the client PC over stdio, or over loopback-only stateless Streamable HTTP. The user's local allow list decides which agents' credentials may leave the PC; MCP callers cannot change it.
+
 ## Recovery and current scope limits
 
 A local process lock prevents two Controllers or Agents from using the same state directory. It is not distributed fencing and does not protect against two copied state directories on different machines. Restore only after isolating the old Controller. Back up the DB, encryption key, CA keys, bindings and credential references together.

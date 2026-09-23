@@ -36,7 +36,54 @@ func acceptCommand(node string, ceiling core.Resources, cmd core.Command) error 
 	if cmd.Action == "ensure" && !cmd.Instance.Pool.Charge().Fits(ceiling) {
 		return errors.New("controller command exceeds node policy")
 	}
+	// A task payload travels only with an ensure of the matching task instance,
+	// and a task instance never receives a GitHub JIT configuration.
+	if cmd.Task != nil && (cmd.Action != "ensure" || cmd.Instance.Task == "" || cmd.Task.ID != cmd.Instance.Task) ||
+		cmd.Action == "ensure" && (cmd.Instance.Task != "" || cmd.Instance.Pool.Tasks) && (cmd.Task == nil || cmd.JIT != "" || !cmd.Instance.Pool.Tasks || cmd.Instance.Task == "") {
+		return errors.New("controller task command does not match its instance")
+	}
 	return nil
+}
+
+type taskProvider interface {
+	EnsureTask(context.Context, core.Instance, core.TaskPayload) error
+}
+type taskReporter interface {
+	TaskReports(context.Context) ([]host.TaskUpload, error)
+	TaskReported(string, bool) error
+}
+
+// reportTasks sends guest results only after the host observed shutdown, and
+// progress while a task VM runs. Results that the Controller permanently
+// refuses are marked so that a malformed guest cannot cause a retry loop.
+func (a *Agent) reportTasks(ctx context.Context) {
+	reporter, ok := a.Provider.(taskReporter)
+	if !ok {
+		return
+	}
+	uploads, e := reporter.TaskReports(ctx)
+	if e != nil {
+		a.Log.Warn("task reports not collected", "error", e.Error())
+		return
+	}
+	for i, u := range uploads {
+		if i >= 4 {
+			break
+		}
+		var reply struct {
+			Accepted bool `json:"accepted"`
+		}
+		e = a.Client.Post(ctx, "/v1/tasks/"+u.Task+"/report", u.Report, &reply)
+		final := u.Report.Result != nil
+		var fault *core.Error
+		if e != nil && !(errors.As(e, &fault) && (fault.Code == "TASK_NOT_FOUND" || fault.Code == "TASK_NOT_OWNED" || fault.Code == "TASK_RESULT" || fault.Code == "TASK_REPORT")) {
+			a.Log.Warn("task report deferred", "instance", u.Report.Instance, "error", e.Error())
+			continue
+		}
+		if e = reporter.TaskReported(u.Report.Instance, final); e != nil {
+			a.Log.Warn("task report state not saved", "instance", u.Report.Instance, "error", e.Error())
+		}
+	}
 }
 
 type Config struct {
@@ -440,6 +487,15 @@ func (a *Agent) Step(ctx context.Context) error {
 		}
 		switch cmd.Action {
 		case "ensure":
+			if cmd.Task != nil {
+				tp, ok := a.Provider.(taskProvider)
+				if !ok {
+					e = errors.New("this node provider cannot run agent tasks")
+					break
+				}
+				e = tp.EnsureTask(ctx, cmd.Instance, *cmd.Task)
+				break
+			}
 			e = a.Provider.Ensure(ctx, cmd.Instance, cmd.JIT)
 		case "stop":
 			if preparer, ok := a.Provider.(interface {
@@ -460,6 +516,7 @@ func (a *Agent) Step(ctx context.Context) error {
 			a.Log.Warn("node operation not completed", "instance", cmd.Instance.ID, "action", cmd.Action, "error", e.Error())
 		}
 	}
+	a.reportTasks(ctx)
 	// Downloads occur only when requested by the authenticated controller and are
 	// SHA checked before publication. No guest can select an arbitrary download URL.
 	for _, im := range a.catalog {

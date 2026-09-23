@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Build a versioned Linux/amd64 archive and optional .deb; never install services."""
+"""Build a versioned Linux/amd64 archive, macOS task-client archives and an
+optional .deb; never install services."""
 from __future__ import annotations
 import argparse, gzip, hashlib, io, json, os, pathlib, re, shutil, subprocess, sys, tarfile, tempfile
 
@@ -29,6 +30,7 @@ def build(out: pathlib.Path, deb: bool) -> list[pathlib.Path]:
     go = os.environ.get('GO', 'go')
     env = dict(os.environ, CGO_ENABLED='0', GOOS='linux', GOARCH='amd64')
     out.mkdir(parents=True, exist_ok=True)
+    extra = client_archives(out.resolve(), version, commit, epoch, go)
     out = out.resolve()
     vendor = ROOT / 'vendor'
     if not (vendor / 'modules.txt').is_file():
@@ -65,17 +67,7 @@ def build(out: pathlib.Path, deb: bool) -> list[pathlib.Path]:
                 'servicesEnabledOnInstall':False}
         (stage/'BUILDINFO.json').write_text(json.dumps(info,indent=2)+'\n')
         archive=out/f'{stage.name}.tar.gz'
-        # Fixed metadata makes equal source, dependency graph and toolchain produce equal archives.
-        with archive.open('wb') as f, gzip.GzipFile(filename='',mode='wb',fileobj=f,mtime=epoch) as g, tarfile.open(fileobj=g,mode='w') as tar:
-            for path in [stage]+sorted(stage.rglob('*')):
-                if path.is_symlink():
-                    raise ValueError(f'Symlinks are not included in distribution: {path}')
-                name=str(path.relative_to(stage.parent))
-                t=tar.gettarinfo(str(path),name);t.mtime=epoch;t.uid=t.gid=0;t.uname=t.gname='root'
-                t.mode=0o755 if path.is_dir() or path==binary else 0o644
-                if path.is_file():
-                    with path.open('rb') as content:tar.addfile(t,content)
-                else:tar.addfile(t)
+        write_archive(archive,stage,binary,epoch)
         files=[archive]
         if deb:
             if not shutil.which('dpkg-deb'):
@@ -112,8 +104,48 @@ Description: Disposable GitHub Actions VMs on your own Linux machines
                            env=dict(os.environ,SOURCE_DATE_EPOCH=str(epoch)),check=True)
             files.append(package)
         infofile=out/f'runnerloom-{version}-buildinfo.json';shutil.copyfile(stage/'BUILDINFO.json',infofile);files.append(infofile)
+        files += extra
         checks=out/'SHA256SUMS';checks.write_text(''.join(f'{sha(p)}  {p.name}\n' for p in files));files.append(checks)
         return files
+
+def write_archive(archive: pathlib.Path, stage: pathlib.Path, binary: pathlib.Path, epoch: int) -> None:
+    # Fixed metadata makes equal source, dependency graph and toolchain produce equal archives.
+    with archive.open('wb') as f, gzip.GzipFile(filename='',mode='wb',fileobj=f,mtime=epoch) as g, tarfile.open(fileobj=g,mode='w') as tar:
+        for path in [stage]+sorted(stage.rglob('*')):
+            if path.is_symlink():
+                raise ValueError(f'Symlinks are not included in distribution: {path}')
+            name=str(path.relative_to(stage.parent))
+            t=tar.gettarinfo(str(path),name);t.mtime=epoch;t.uid=t.gid=0;t.uname=t.gname='root'
+            t.mode=0o755 if path.is_dir() or path==binary else 0o644
+            if path.is_file():
+                with path.open('rb') as content:tar.addfile(t,content)
+            else:tar.addfile(t)
+
+def client_archives(out: pathlib.Path, version: str, commit: str, epoch: int, go: str) -> list[pathlib.Path]:
+    """macOS builds are for the PC side of agent tasks (client, task and mcp
+    commands). Controller and Node roles remain Linux-only."""
+    files=[]
+    for arch in ('arm64','amd64'):
+        with tempfile.TemporaryDirectory(prefix='runnerloom-client-') as temp:
+            stage=pathlib.Path(temp)/f'runnerloom-{version}-darwin-{arch}'
+            stage.mkdir()
+            binary=stage/'runnerloom'
+            subprocess.run([go,'build','-trimpath','-buildvcs=false','-ldflags',
+                            f'-s -w -X github.com/MOVEI144/RunnerLoom/internal/cli.Version={version} '
+                            f'-X github.com/MOVEI144/RunnerLoom/internal/cli.Commit={commit}',
+                            '-o',str(binary),'./cmd/runnerloom'],cwd=ROOT,env=dict(os.environ,CGO_ENABLED='0',GOOS='darwin',GOARCH=arch),check=True)
+            binary.chmod(0o755)
+            for name in ['LICENSE','README.md','SECURITY.md','CHANGELOG.md']:
+                shutil.copyfile(ROOT/name,stage/name)
+            (stage/'docs').mkdir()
+            shutil.copyfile(ROOT/'docs'/'AGENT_TASKS.ja.md',stage/'docs'/'AGENT_TASKS.ja.md')
+            info={'version':version,'sourceCommit':commit,'sourceDateEpoch':epoch,'goVersion':run([go,'version']),
+                  'target':f'darwin/{arch}','scope':'task client (client, task, mcp commands)','binarySHA256':sha(binary)}
+            (stage/'BUILDINFO.json').write_text(json.dumps(info,indent=2)+'\n')
+            archive=out/f'{stage.name}.tar.gz'
+            write_archive(archive,stage,binary,epoch)
+            files.append(archive)
+    return files
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)

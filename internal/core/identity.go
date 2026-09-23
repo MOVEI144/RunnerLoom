@@ -155,7 +155,21 @@ func ParseCSR(b []byte) (*x509.CertificateRequest, error) {
 	return c, nil
 }
 func (ca CA) Sign(csr []byte, cluster, node string) ([]byte, error) {
-	if !ValidName(cluster) || !ValidName(node) {
+	return ca.sign(csr, cluster, "node", node, 30*24*time.Hour)
+}
+
+// ClientCertificateLifetime is longer than a Node's because a task client is
+// usually a laptop that may stay offline for weeks; it still renews in-band.
+const ClientCertificateLifetime = 90 * 24 * time.Hour
+
+// SignClient issues a task-client identity. Its URI kind differs from a Node's,
+// so a client certificate can never synchronize VMs and a Node certificate can
+// never submit tasks.
+func (ca CA) SignClient(csr []byte, cluster, name string) ([]byte, error) {
+	return ca.sign(csr, cluster, "client", name, ClientCertificateLifetime)
+}
+func (ca CA) sign(csr []byte, cluster, kind, name string, lifetime time.Duration) ([]byte, error) {
+	if !ValidName(cluster) || !ValidName(name) || (kind != "node" && kind != "client") {
 		return nil, errors.New("invalid certificate identity")
 	}
 	req, e := ParseCSR(csr)
@@ -163,8 +177,8 @@ func (ca CA) Sign(csr []byte, cluster, node string) ([]byte, error) {
 		return nil, e
 	}
 	now := time.Now().UTC()
-	uri := &url.URL{Scheme: "spiffe", Host: "runnerloom", Path: "/cluster/" + cluster + "/node/" + node}
-	tpl := &x509.Certificate{SerialNumber: serial(), Subject: pkix.Name{CommonName: node}, URIs: []*url.URL{uri}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(30 * 24 * time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, BasicConstraintsValid: true}
+	uri := &url.URL{Scheme: "spiffe", Host: "runnerloom", Path: "/cluster/" + cluster + "/" + kind + "/" + name}
+	tpl := &x509.Certificate{SerialNumber: serial(), Subject: pkix.Name{CommonName: name}, URIs: []*url.URL{uri}, NotBefore: now.Add(-time.Minute), NotAfter: now.Add(lifetime), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, BasicConstraintsValid: true}
 	if tpl.NotAfter.After(ca.Certificate.NotAfter) {
 		return nil, errors.New("CA renewal required")
 	}
@@ -219,20 +233,28 @@ func ClientTLS(caPEM []byte, pin, hostname string, certificate *tls.Certificate)
 	return cfg, nil
 }
 func NodeIdentity(cert *x509.Certificate, cluster string) (string, error) {
+	return peerIdentity(cert, cluster, "node")
+}
+
+// ClientIdentity accepts only task-client certificates of this cluster.
+func ClientIdentity(cert *x509.Certificate, cluster string) (string, error) {
+	return peerIdentity(cert, cluster, "client")
+}
+func peerIdentity(cert *x509.Certificate, cluster, kind string) (string, error) {
 	if cert != nil && (time.Now().Before(cert.NotBefore) || !time.Now().Before(cert.NotAfter)) {
-		return "", errors.New("node certificate is expired or not yet valid")
+		return "", errors.New(kind + " certificate is expired or not yet valid")
 	}
 	if cert == nil || cert.IsCA || len(cert.URIs) != 1 {
-		return "", errors.New("invalid node certificate")
+		return "", errors.New("invalid " + kind + " certificate")
 	}
 	u := cert.URIs[0]
-	prefix := "/cluster/" + cluster + "/node/"
+	prefix := "/cluster/" + cluster + "/" + kind + "/"
 	if u.Scheme != "spiffe" || u.Host != "runnerloom" || !strings.HasPrefix(u.Path, prefix) {
-		return "", errors.New("node belongs to a different cluster")
+		return "", errors.New(kind + " belongs to a different cluster or role")
 	}
 	n := strings.TrimPrefix(u.Path, prefix)
 	if !ValidName(n) {
-		return "", errors.New("invalid node name")
+		return "", errors.New("invalid " + kind + " name")
 	}
 	return n, nil
 }
@@ -398,7 +420,9 @@ func (s *Store) Approve(ctx context.Context, id string, ca CA) (out Enrollment, 
 		} else {
 			n = Node{Name: out.Name, Budget: out.Ceiling, LocalCeiling: out.Ceiling, AllowedPools: []string{}}
 			for _, p := range c.Pools {
-				if p.Charge().Fits(out.Ceiling) {
+				// Task Pools carry user credentials: an administrator opts
+				// each Node in explicitly.
+				if p.Charge().Fits(out.Ceiling) && !p.Tasks {
 					n.AllowedPools = append(n.AllowedPools, p.Name)
 				}
 			}

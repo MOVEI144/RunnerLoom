@@ -1,0 +1,16 @@
+{
+  "name": "runnerloom",
+  "owner": {
+    "name": "MOVEI144"
+  },
+  "metadata": {
+    "description": "Plugins for RunnerLoom, self-hosted disposable VMs for GitHub Actions and coding-agent tasks."
+  },
+  "plugins": [
+    {
+      "name": "runnerloom",
+      "source": "./plugins/runnerloom",
+      "description": "Delegate long-running coding tasks to codex, claude, opencode, pi, gemini or custom agents in disposable VMs on your own machines, using the logins already on this PC."
+    }
+  ]
+}
