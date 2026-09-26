@@ -1,0 +1,167 @@
+name: Internal finish interactive CLI
+
+on:
+  push:
+    branches: [feat/interactive-cli-rc4]
+    paths:
+      - .github/workflows/internal-finish-interactive-cli.yml
+
+permissions:
+  contents: write
+
+jobs:
+  finish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.1'
+          cache: true
+      - name: Make final edits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          cli = Path("internal/cli/cli.go")
+          text = cli.read_text(encoding="utf-8")
+          old_struct = '''type App struct {
+          \tState          string
+          \tJSON           bool
+          \tNonInteractive bool
+          \tIn             io.Reader
+          \tOut            io.Writer
+          \tErr            io.Writer
+          }
+          '''
+          new_struct = '''type App struct {
+          \tState          string
+          \tJSON           bool
+          \tNonInteractive bool
+          \tIn             io.Reader
+          \tOut            io.Writer
+          \tErr            io.Writer
+
+          \t// Test hooks are intentionally unexported. Production uses TTY detection and
+          \t// creates a fresh Cobra command for every guided action.
+          \tinteractiveTerminal func() bool
+          \tinteractiveCommand  func(context.Context, []string) error
+          }
+          '''
+          if new_struct not in text:
+              if old_struct not in text:
+                  raise SystemExit("App struct target missing")
+              text = text.replace(old_struct, new_struct, 1)
+
+          old_run = '\troot.RunE = func(c *cobra.Command, _ []string) error { return c.Help() }\n'
+          new_run = '''\troot.RunE = func(c *cobra.Command, _ []string) error {
+          \t\tif a.JSON || a.NonInteractive || !a.isInteractiveTerminal() {
+          \t\t\treturn c.Help()
+          \t\t}
+          \t\treturn a.runInteractive(c.Context())
+          \t}
+          '''
+          if new_run not in text:
+              if old_run not in text:
+                  raise SystemExit("root RunE target missing")
+              text = text.replace(old_run, new_run, 1)
+          if "\ta.addInteractive(root)\n" not in text:
+              marker = "\ta.addCache(root)\n"
+              if marker in text:
+                  text = text.replace(marker, marker + "\ta.addInteractive(root)\n", 1)
+              else:
+                  index = text.rfind("\treturn root\n")
+                  if index < 0:
+                      raise SystemExit("command return missing")
+                  text = text[:index] + "\ta.addInteractive(root)\n" + text[index:]
+          cli.write_text(text, encoding="utf-8")
+
+          setup = Path("internal/cli/setup.go")
+          text = setup.read_text(encoding="utf-8")
+          text = text.replace("reader := bufio.NewReader(a.In)", "reader := sharedReader(a.In)")
+          setup.write_text(text, encoding="utf-8")
+
+          interactive = Path("internal/cli/interactive.go")
+          text = interactive.read_text(encoding="utf-8")
+          old_printf = '''func (s *interactiveSession) printf(format string, values ...any) {
+          \tsafe := make([]any, len(values))
+          \tfor index, value := range values {
+          \t\tsafe[index] = interactiveSafe(fmt.Sprint(value))
+          \t}
+          \t_, _ = fmt.Fprintf(s.app.Err, format, safe...)
+          }
+          '''
+          new_printf = '''func (s *interactiveSession) printf(format string, values ...any) {
+          \t_, _ = fmt.Fprint(s.app.Err, interactiveSafe(fmt.Sprintf(format, values...)))
+          }
+          '''
+          if old_printf in text:
+              text = text.replace(old_printf, new_printf, 1)
+          interactive.write_text(text, encoding="utf-8")
+
+          tests = Path("internal/cli/interactive_test.go")
+          text = tests.read_text(encoding="utf-8").replace("root.SetArgs(nil)", "root.SetArgs([]string{})")
+          tests.write_text(text, encoding="utf-8")
+
+          Path("VERSION").write_text("0.1.0-rc.4\n", encoding="utf-8")
+
+          checker = Path("scripts/check-docs.py")
+          text = checker.read_text(encoding="utf-8")
+          entry = '    ROOT / "docs" / "INTERACTIVE_CLI.ja.md",\n'
+          if entry not in text:
+              for marker in (
+                  '    ROOT / "docs" / "CACHE.ja.md",\n',
+                  '    ROOT / "docs" / "TROUBLESHOOTING.ja.md",\n',
+                  '    ROOT / "docs" / "README.md",\n',
+              ):
+                  if marker in text:
+                      text = text.replace(marker, marker + entry, 1)
+                      break
+              else:
+                  raise SystemExit("documentation tuple marker missing")
+              checker.write_text(text, encoding="utf-8")
+          PY
+
+          gofmt -w internal/cli/cli.go internal/cli/setup.go internal/cli/interactive.go internal/cli/interactive_test.go
+          go mod tidy
+
+      - name: Validate full change
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l cmd internal)"
+          python3 scripts/check-docs.py
+          git diff --check
+          go vet ./...
+          go test -count=1 ./...
+          go test -race -count=1 ./internal/cli
+          python3.12 scripts/package.py --deb
+          python3.12 scripts/test_package.py dist
+          stage="$RUNNER_TEMP/package-check"
+          mkdir -p "$stage"
+          tar -xzf dist/runnerloom-*-linux-amd64.tar.gz -C "$stage"
+          test -n "$(find "$stage" -path '*/docs/INTERACTIVE_CLI.ja.md' -print -quit)"
+
+      - name: Remove temporary workflows and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/internal-apply-interactive-cli.yml
+          rm -f .github/workflows/internal-finish-interactive-cli.yml
+          rm -f .github/workflows/internal-source-export.yml
+          git config user.name runnerloom-interactive-bot
+          git config user.email '184829077+Aero123421@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'No final changes to commit'
+          else
+            git commit -m 'feat(cli): add safe guided interactive mode'
+            git push origin HEAD:feat/interactive-cli-rc4
+          fi
