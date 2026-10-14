@@ -36,7 +36,7 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write('## Live GitHub E2E: NOT RUN\n\n'+report['reason']+'\n\nThe separate runtime job uses explicit GitHub/workload fixtures. It is not a live GitHub or home-cluster acceptance test.\n')
           PY
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: e2e-prerequisites-${{ github.run_id }}
@@ -94,7 +94,7 @@ jobs:
           done
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/e2e-evidence"
           printf '## Qualification boundary\n\nController, enrolled Agent, SQLite, TLS, real libvirt VMs, image and disk cleanup are tested. GitHub queue/JIT responses and the guest workload are explicit diagnostic fixtures. Live GitHub job execution and home-PC deployment are NOT claimed.\n' >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
           name: e2e-runtime-${{ github.run_id }}
